@@ -142,3 +142,20 @@ h2 { font-size: 15px; margin: 0 0 10px; letter-spacing: -0.005em; }
 .connect input, .connect textarea { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
 .connect label { display: block; font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
 .or { text-align: center; color: var(--muted); font-size: 13px; margin: 6px 0 12px; }
+
+/* phase 2 */
+.tabs .count { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--warn); color: var(--bg); font-size: 11px; line-height: 18px; text-align: center; }
+.item.static { cursor: default; }
+.list .item.static { display: block; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.btn.sm { padding: 6px 11px; font-size: 13px; text-decoration: none; color: var(--text); }
+.btn.primary.sm { color: #fff; }
+@media (prefers-color-scheme: dark) { .btn.primary.sm { color: #06231b; } }
+.btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+.btn.back { margin-bottom: 10px; padding: 6px 12px; font-size: 14px; }
+a.btn { text-decoration: none; color: var(--text); display: inline-block; }
+.tbl .tr { display: grid; grid-template-columns: minmax(0, 1.4fr) 1fr 1fr 1fr; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; font-variant-numeric: tabular-nums; }
+.tbl .tr span:not(:first-child) { text-align: right; }
+.tbl .tr span span { text-align: left; }
+.tbl .th { border-top: 0; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.item .l3 { overflow-wrap: anywhere; }
