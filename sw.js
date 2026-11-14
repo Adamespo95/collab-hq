@@ -1,6 +1,6 @@
 // Collab HQ service worker: keeps the app itself available offline.
 // Your data is cached separately by app.js in IndexedDB.
-const CACHE = 'collab-hq-v2';
+const CACHE = 'collab-hq-v3';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
@@ -18,22 +18,27 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Serve from cache first, refresh the cache in the background (so the next launch is up to date).
+// Online: always fetch the newest files (and refresh the offline copy). Offline or slow: use the saved copy.
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  e.respondWith(
-    caches.open(CACHE).then(async (cache) => {
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    try {
+      const res = await Promise.race([
+        fetch(req.url, { cache: 'no-cache' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('slow network')), 4000))
+      ]);
+      if (res && res.ok) cache.put(req, res.clone());
+      return res;
+    } catch (err) {
       const cached = await cache.match(req, { ignoreSearch: true });
-      const fresh = fetch(req).then((res) => {
-        if (res && res.ok) cache.put(req, res.clone());
-        return res;
-      }).catch(() => null);
-      if (cached) { e.waitUntil(fresh); return cached; }
-      const res = await fresh;
-      if (res) return res;
-      if (req.mode === 'navigate') return cache.match('index.html');
+      if (cached) return cached;
+      if (req.mode === 'navigate') {
+        const index = await cache.match('index.html');
+        if (index) return index;
+      }
       return new Response('Offline', { status: 503 });
-    })
-  );
+    }
+  })());
 });

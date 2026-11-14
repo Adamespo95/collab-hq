@@ -1,5 +1,5 @@
 'use strict';
-/* Collab HQ app (phase 2). No build step, no libraries.
+/* Collab HQ app (phases 1-3). No build step, no libraries.
    - Data is cached on this device in IndexedDB, so everything works offline.
    - Edits made offline wait in an "outbox" and are sent on the next sync.
    - Nothing here makes up numbers: every figure is summed from rows in your Google Sheet.
@@ -73,7 +73,8 @@ const FORMS = {
 const S = {
   cfg: null, data: null, outbox: [], lastSync: null,
   syncing: false, err: null, view: 'dash', period: 'all',
-  filter: { Deals: 'active', Payments: 'all', Contracts: 'all', Affiliate: 'all', review: 'new' }, q: '', csv: null
+  filter: { Deals: 'active', Payments: 'all', Contracts: 'all', Affiliate: 'all', review: 'new' }, q: '', csv: null,
+  busy: false, bfMsg: ''
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -93,6 +94,8 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'x' + Date.now() + 
 const low = (s) => String(s ?? '').trim().toLowerCase();
 const T = (name) => (S.data && S.data.tables[name]) || [];
 const v2 = () => !!(S.data && S.data.version >= 2);
+const v3 = () => !!(S.data && S.data.version >= 3);
+const brandMatch = (a, b) => !!low(a) && !!low(b) && (low(a).startsWith(low(b)) || low(b).startsWith(low(a)));
 
 function inPeriod(date, p) {
   const d = String(date ?? '');
@@ -207,19 +210,21 @@ function mutate(table, id, fields) { mutateMany([[table, id, fields]]); }
 let syncTimer = null;
 function scheduleSync(ms) { clearTimeout(syncTimer); syncTimer = setTimeout(() => sync(), ms); }
 
+function absorb(res, sent) {
+  if (!res.ok) throw new Error(res.error || 'Sync failed');
+  const done = new Set(sent.map((c) => c.seq));
+  S.outbox = S.outbox.filter((c) => !done.has(c.seq));
+  takeSnapshot(res);
+  S.outbox.forEach(applyLocal); // edits made while the request was in flight
+  S.err = null;
+}
 async function sync(action = 'sync') {
-  if (!S.cfg || S.syncing) return;
+  if (!S.cfg || S.syncing || S.busy) return;
   if (!navigator.onLine) { renderStatus(); return; }
   S.syncing = true; renderStatus();
   const sent = S.outbox.slice();
   try {
-    const res = await api({ action, changes: sent });
-    if (!res.ok) throw new Error(res.error || 'Sync failed');
-    const done = new Set(sent.map((c) => c.seq));
-    S.outbox = S.outbox.filter((c) => !done.has(c.seq));
-    takeSnapshot(res);
-    S.outbox.forEach(applyLocal); // edits made while the request was in flight
-    S.err = null;
+    absorb(await api({ action, changes: sent }), sent);
   } catch (e) {
     S.err = e.message;
   } finally {
@@ -525,7 +530,7 @@ function listViewHtml(table) {
 }
 
 /* ----------------------------------------------------------------- review */
-const KIND_LABEL = { deal: 'Labeled "Collab"', payment: 'Money received', affiliate: 'Referral sale' };
+const KIND_LABEL = { deal: 'Labeled "Collab"', payment: 'Money received', affiliate: 'Referral sale', contract: 'Contract PDF', contact: 'Brand contact', label: 'Unknown payer' };
 function reviewHtml() {
   const m = S.data.meta || {};
   const f = S.filter.review;
@@ -533,7 +538,7 @@ function reviewHtml() {
   const rows = all.filter((q) => low(q.status) === f).sort((a, b) => String(b.received).localeCompare(String(a.received)));
   const n = (s) => all.filter((q) => low(q.status) === s).length;
   const head = `<p class="small muted" style="margin:0 0 10px">Emails Collab HQ noticed. Nothing here is saved as a deal or payment until you approve it.
-    To send a brand thread here, put the Gmail label <b>Collab</b> on it. PayPal, Venmo and GoAffPro receipts arrive on their own.
+    To send a brand thread here, put the Gmail label <b>Collab</b> on it. PayPal, Venmo and GoAffPro receipts arrive on their own. Old mail comes in through More &gt; Historical backfill.
     Gmail last checked ${esc(when(m.gmail_last_scan))}.${m.gmail_last_error ? ` <span style="color:var(--bad)">${esc(m.gmail_last_error)}</span>` : ''}</p>`;
   if (!v2()) return head + '<div class="empty">Review switches on after you update the Google backend (SETUP.md, Part D).</div>';
   return head + `<div class="chips">${[['new', 'New'], ['approved', 'Approved'], ['dismissed', 'Dismissed']].map(([k, l]) => `<button data-act="rfilter" data-f="${k}" class="${f === k ? 'on' : ''}">${l} ${n(k)}</button>`).join('')}</div>
@@ -541,16 +546,33 @@ function reviewHtml() {
 }
 function queueItemHtml(q) {
   const isNew = low(q.status) === 'new';
-  const title = q.kind === 'payment' ? q.payer : (q.brand_guess || q.from);
+  const title = q.kind === 'payment' || q.kind === 'label' ? q.payer : (q.brand_guess || q.from);
   let detail = '';
   if (q.kind === 'deal') {
     detail = `<div class="l3">${q.amounts ? 'Amounts mentioned: ' + esc(q.amounts) : 'No dollar amounts found'}${q.dates ? ' · Dates mentioned: ' + esc(q.dates) : ''}</div>`;
   } else if (q.kind === 'affiliate') {
     detail = `<div class="l3">Order ${esc(q.order_ref || '?')}${hasNum(q.sale_amount) ? ' · sale ' + usd(num(q.sale_amount)) : ''} · commission ${hasNum(q.amount_usd) ? usd(num(q.amount_usd)) : '?'}</div>`;
   }
+  else if (q.kind === 'contract') {
+    detail = `<div class="l3">File: ${esc(q.attachment)}</div>`;
+    if (!isNew && low(q.status) === 'approved') {
+      detail += `<div class="l3">${q.filed === '1' ? `<a href="${esc(q.drive_url)}" target="_blank" rel="noopener">Saved to Drive and linked</a>` : q.filed === 'failed' ? `<span class="badge bad">Not saved</span> ${esc(q.hint)}` : 'The PDF is saved to your Contracts folder on the next sync.'}</div>`;
+    }
+  } else if (q.kind === 'contact') {
+    detail = `<div class="l3">Suggested contact for ${esc(q.brand_guess)}: ${esc(q.from)}</div><div class="l3">${esc(q.snippet)}</div>`;
+  }
+  if (q.hint && q.filed !== 'failed') detail += `<div class="l3"><span class="badge">Lead</span> ${esc(q.hint)}</div>`;
   const id = esc(q.id);
   let acts = '';
-  if (isNew) {
+  if (isNew && q.kind === 'contract') {
+    const cands = T('Contracts').filter((c) => !c.drive_url && brandMatch(c.brand, q.brand_guess)).slice(0, 4);
+    acts = cands.map((c) => `<button class="btn primary sm" data-act="qfile" data-id="${id}" data-c="${esc(c.id)}">File under: ${esc(c.document)}</button>`).join('') +
+      `<button class="btn sm" data-act="qcontract" data-id="${id}">New contract</button><button class="btn sm" data-act="qdismiss" data-id="${id}">Dismiss</button>`;
+  } else if (isNew && q.kind === 'contact') {
+    acts = `<button class="btn primary sm" data-act="qcontact" data-id="${id}">Save as contact</button><button class="btn sm" data-act="qdismiss" data-id="${id}">Dismiss</button>`;
+  } else if (isNew && q.kind === 'label') {
+    acts = `<button class="btn primary sm" data-act="qlabel" data-id="${id}">Label this payment</button><button class="btn sm" data-act="qdismiss" data-id="${id}">Dismiss</button>`;
+  } else if (isNew) {
     if (q.kind === 'deal') acts = `<button class="btn primary sm" data-act="qdeal" data-id="${id}">Create deal</button><button class="btn sm" data-act="qpay" data-id="${id}">Log payment</button>`;
     else if (q.kind === 'payment') acts = `<button class="btn primary sm" data-act="qpay" data-id="${id}">Log payment</button>`;
     else acts = `<button class="btn primary sm" data-act="qaff" data-id="${id}">Add to affiliate log</button>`;
@@ -559,18 +581,30 @@ function queueItemHtml(q) {
     acts = `<button class="btn sm" data-act="qrestore" data-id="${id}">Move back to New</button>`;
   }
   return `<div class="item static">
-    <div class="l1"><span class="t">${esc(title)}</span><span class="a">${q.kind !== 'deal' && hasNum(q.amount_usd) ? usd(num(q.amount_usd)) : ''}</span></div>
-    <div class="l2">${esc(KIND_LABEL[q.kind] || q.kind)} · ${esc(q.received)} · ${esc(q.from)}</div>
+    <div class="l1"><span class="t">${esc(title)}</span><span class="a">${['payment', 'affiliate', 'label'].includes(q.kind) && hasNum(q.amount_usd) ? usd(num(q.amount_usd)) : ''}</span></div>
+    <div class="l2">${esc(KIND_LABEL[q.kind] || q.kind)} · ${esc(q.received)}${q.from ? ' · ' + esc(q.from) : ''}</div>
     <div class="l3">${esc(q.subject)}</div>
     ${detail}
     ${q.kind === 'deal' && q.snippet ? `<div class="l3">“${esc(q.snippet)}”</div>` : ''}
     ${q.possible_duplicate ? `<div class="l3"><span class="badge warn">Possible duplicate</span> ${esc(q.possible_duplicate)}</div>` : ''}
-    <div class="acts">${acts}${q.thread_url ? `<a class="btn sm" href="${esc(q.thread_url)}" target="_blank" rel="noopener">Open email</a>` : ''}</div>
+    <div class="acts">${acts}${q.thread_url ? `<a class="btn sm" href="${esc(q.thread_url)}" target="_blank" rel="noopener">${q.from === 'Google Drive' ? 'Open file' : 'Open email'}</a>` : ''}</div>
   </div>`;
 }
 const queueRow = (id) => T('Queue').find((q) => q.id === id);
 
 /* --------------------------------------------------------------- settings */
+function backfillCardHtml() {
+  if (!v3()) return v2() ? '<div class="card"><h2>Historical backfill</h2><p class="small muted" style="margin:0">Switches on after the next backend update (SETUP.md, Part E).</p></div>' : '';
+  const m = S.data.meta || {};
+  let st = null;
+  try { st = JSON.parse(m.backfill_state || 'null'); } catch (e) { st = null; }
+  const label = S.busy ? 'Scanning…' : st && st.done ? 'Scan again' : st ? 'Continue scan' : 'Start scan';
+  const msg = S.bfMsg || (st && st.done ? `Finished ${esc(when(st.finished))}. ${st.added} items went to Review, ${st.dup} matched payments you already have.` : st ? 'A scan was started and has not finished.' : 'Not run yet.');
+  return `<div class="card"><h2>Historical backfill</h2>
+    <p class="small muted" style="margin:0 0 8px">Reads all of your Gmail and Drive once and sends what it finds to Review: old PayPal, Venmo and referral receipts that are not logged yet, leads on unknown payers, contract PDFs, and your contact at each brand. Nothing is saved until you approve it. It takes a few minutes; keep this screen open.</p>
+    <p class="small" style="margin:0 0 10px">${esc(msg)}${m.backfill_last_error && !S.busy ? ` <span style="color:var(--bad)">Last problem: ${esc(m.backfill_last_error)}</span>` : ''}</p>
+    <button class="btn primary" data-act="backfill" ${S.busy ? 'disabled' : ''}>${label}</button></div>`;
+}
 function settingsHtml() {
   const m = S.data.meta || {};
   const src = T('Sources');
@@ -597,6 +631,7 @@ function settingsHtml() {
     </div>
     <p class="note">"Fetch everything" re-reads YouTube, Gmail, Awin, Impact, the Contracts folder and the payout calendar. It can take a minute or two.</p>
   </div>
+  ${backfillCardHtml()}
   <div class="card"><h2>Where each number comes from</h2>
     ${src.map((s) => `<div class="kv"><span>${esc(s.name)}<br><span class="muted small">${esc(s.method)} · ${esc(s.status)}${s.note ? ' · ' + esc(s.note) : ''}</span></span><span class="small muted" style="white-space:nowrap">${s.last_synced ? esc(when(s.last_synced)) : ''}</span></div>`).join('') || '<div class="empty small">No sources listed.</div>'}
     ${m.seed_imported_at ? `<p class="note">Starting CSVs imported ${esc(when(m.seed_imported_at))}.</p>` : ''}
@@ -634,8 +669,9 @@ function fieldHtml([name, label, type, opts], val) {
 /** id = edit that row. No id = new row, optionally pre-filled (preset) and tied to a Review item (queueId). */
 function openForm(table, id, preset, queueId) {
   const def = FORMS[table];
-  const row = id ? T(table).find((r) => r.id === id) : { ...def.defaults(), ...(preset || {}) };
-  if (!row) return;
+  const existing = id ? T(table).find((r) => r.id === id) : null;
+  if (id && !existing) return;
+  const row = id ? { ...existing, ...(preset || {}) } : { ...def.defaults(), ...(preset || {}) };
   let extra = '';
   if (table === 'Deals' && id) {
     const cons = T('Contracts').filter((c) => low(c.brand) && (low(row.brand).startsWith(low(c.brand)) || low(c.brand).startsWith(low(row.brand))));
@@ -682,7 +718,10 @@ function saveForm(form) {
     batch.push(['Brands', uid(), { name: fields.brand, contact_name: '', contact_email: '', notes: '', deleted: '' }]);
   }
   batch.push([table, id, fields]);
-  if (form.dataset.queue) batch.push(['Queue', form.dataset.queue, { status: 'approved' }]);
+  if (form.dataset.queue) {
+    const q = queueRow(form.dataset.queue);
+    batch.push(['Queue', form.dataset.queue, q && q.kind === 'contract' ? { status: 'approved', link_id: id } : { status: 'approved' }]);
+  }
   closeForm();
   mutateMany(batch);
   toast(navigator.onLine ? 'Saved' : 'Saved on this device. Will sync when you are back online.');
@@ -839,6 +878,54 @@ const ACT = {
       ['Queue', q.id, { status: 'approved' }]
     ]);
     toast('Added to the affiliate log');
+  },
+  qfile(el) {
+    mutate('Queue', el.dataset.id, { status: 'approved', link_id: el.dataset.c });
+    toast('Approved. The PDF is saved to your Contracts folder and linked on sync.');
+  },
+  qcontract(el) {
+    const q = queueRow(el.dataset.id); if (!q) return;
+    openForm('Contracts', null, {
+      brand: q.brand_guess, document: String(q.attachment || '').replace(/\.pdf$/i, ''), date: q.received, status: 'Signed',
+      where_to_find: q.from === 'Google Drive' ? 'Google Drive' : 'Gmail: ' + q.subject
+    }, q.id);
+  },
+  qcontact(el) {
+    const q = queueRow(el.dataset.id); if (!q) return;
+    const m = /^\s*(.*?)\s*<([^>]+)>\s*$/.exec(q.from) || [null, '', q.from];
+    const batch = [['Brands', q.link_id, { contact_name: m[1], contact_email: m[2] }]];
+    for (const d of T('Deals')) if (!d.contact && low(d.brand) === low(q.brand_guess)) batch.push(['Deals', d.id, { contact: q.from }]);
+    batch.push(['Queue', q.id, { status: 'approved' }]);
+    mutateMany(batch);
+    toast(`Saved. Also filled in on ${batch.length - 2} ${q.brand_guess} deal(s) that had no contact.`);
+  },
+  qlabel(el) {
+    const q = queueRow(el.dataset.id); if (!q) return;
+    const p = T('Payments').find((r) => r.id === q.link_id);
+    if (!p) return toast('That payment is no longer in the list.');
+    openForm('Payments', p.id, { brand_or_program: q.brand_guess, note: [p.note, q.hint].filter(Boolean).join(' | ') }, q.id);
+  },
+  async backfill() {
+    if (!navigator.onLine) return toast('You are offline.');
+    if (S.busy) return;
+    let st = null;
+    try { st = JSON.parse((S.data.meta || {}).backfill_state || 'null'); } catch (e) { st = null; }
+    const reset = !!(st && st.done);
+    if (reset && !confirm('Scan everything again? Items you already approved or dismissed stay as they are.')) return;
+    S.busy = true; S.bfMsg = 'Starting…'; render();
+    try {
+      for (let i = 0; i < 40; i++) {
+        const sent = S.outbox.slice();
+        const res = await api({ action: 'backfill', reset: reset && i === 0, changes: sent });
+        absorb(res, sent);
+        S.bfMsg = (res.backfill && res.backfill.message) || '';
+        await persist(); render();
+        if (!res.backfill || res.backfill.done || res.backfill.failed) break;
+      }
+    } catch (e) {
+      S.bfMsg = 'Stopped: ' + e.message + '. Tap the button again to pick up where it left off.';
+    }
+    S.busy = false; await persist(); render();
   },
   qdismiss(el) { mutate('Queue', el.dataset.id, { status: 'dismissed' }); },
   qrestore(el) { mutate('Queue', el.dataset.id, { status: 'new' }); },
