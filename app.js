@@ -101,6 +101,10 @@ const T = (name) => (S.data && S.data.tables[name]) || [];
 const v2 = () => !!(S.data && S.data.version >= 2);
 const v4 = () => !!(S.data && S.data.version >= 4);
 const v3 = () => !!(S.data && S.data.version >= 3);
+const v5 = () => !!(S.data && S.data.version >= 5);
+// Real AdSense payouts (date + exact amount) and the balance AdSense has not paid out yet.
+const adsPaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'paid' && r.date && hasNum(r.amount_usd));
+const adsUnpaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'unpaid' && num(r.amount_usd) > 0);
 const brandMatch = (a, b) => !!low(a) && !!low(b) && (low(a).startsWith(low(b)) || low(b).startsWith(low(a)));
 
 function inPeriod(date, p) {
@@ -190,7 +194,7 @@ async function api(body, cfg = S.cfg) {
 }
 function takeSnapshot(res) {
   S.data = {
-    version: res.version || 1, tables: res.tables, youtube: res.youtube || [], meta: res.meta || {},
+    version: res.version || 1, tables: res.tables, youtube: res.youtube || [], adsense: res.adsense || [], meta: res.meta || {},
     sheet_url: res.sheet_url, folder_url: res.folder_url
   };
   for (const name of ALL_TABLES) if (!S.data.tables[name]) S.data.tables[name] = [];
@@ -260,8 +264,16 @@ function totals(p) {
     const b = label === 'Unlabeled' ? 'Unlabeled' : brandKey(r.brand_or_program);
     out.byBrand[b] = (out.byBrand[b] || 0) + a;
   }
-  for (const [d, v] of (S.data.youtube || [])) if (inPeriod(d, p)) { out.yt += v; out.ytDays++; }
-  if (out.ytDays) out.bySource['YouTube AdSense (estimated)'] = out.yt;
+  const deposits = adsPaid();
+  if (deposits.length) {
+    // Cash basis: what AdSense actually paid, on the day it paid.
+    out.deposits = deposits.filter((r) => inPeriod(r.date, p));
+    for (const r of out.deposits) out.yt += num(r.amount_usd);
+    if (out.deposits.length) out.bySource['AdSense deposits (YouTube)'] = out.yt;
+  } else {
+    for (const [d, v] of (S.data.youtube || [])) if (inPeriod(d, p)) { out.yt += v; out.ytDays++; }
+    if (out.ytDays) out.bySource['YouTube AdSense (estimated)'] = out.yt;
+  }
   for (const d of T('Deals')) {
     if (!hasNum(d.product_value) || ['talking', 'declined'].includes(stageOf(d)) || !inPeriod(d.date, p)) continue;
     out.product += num(d.product_value); out.productDeals++;
@@ -443,6 +455,10 @@ function breakdownHtml() {
       ${[['month', 'This month'], ['ytd', 'This year'], ['all', 'All-time']].map(([p, l]) => `<button data-act="period" data-p="${p}" class="${S.period === p ? 'on' : ''}">${l}</button>`).join('')}
     </div>
     <h3>Where it came from</h3>${barsHtml(cur.bySource)}
+    ${cur.deposits && cur.deposits.length ? `<h3>AdSense deposits</h3>
+      ${cur.deposits.slice().reverse().map((r) => `<div class="kv"><span>${esc(fmtDay(r.date))}</span><b>${usd(num(r.amount_usd))}</b></div>`).join('')}
+      <div class="kv"><span>Total</span><b>${usd(cur.yt)}</b></div>
+      <div class="src">Source: AdSense, exact amounts · synced ${esc(when(m.adsense_last_sync))}</div>` : ''}
     <h3>Who paid</h3>${barsHtml(cur.byBrand)}
     <div class="src">Brands and programs from your logged payments. YouTube is not split by brand.</div>
     <h3>Also received, not counted as earned</h3>
@@ -459,7 +475,9 @@ function earningsHtml() {
   const ytOk = (S.data.youtube || []).length > 0;
   const cells = [['month', monthName()], ['ytd', curYear()], ['all', 'All-time']].map(([p, label]) =>
     `<div><div class="lab">${esc(label)}</div><div class="val">${usd(totals(p).total)}</div></div>`).join('');
-  const src = ytOk
+  const src = adsPaid().length
+    ? `Payments you logged + AdSense deposits since ${esc(fmtDay(m.adsense_first_date))} (actual, not estimates) · synced ${esc(when(S.lastSync))}`
+    : ytOk
     ? `Payments you logged + YouTube estimate through ${esc(fmtDay(m.yt_data_through))} · synced ${esc(when(S.lastSync))}`
     : `Payments you logged only. YouTube ${m.yt_last_error ? 'failed: ' + esc(m.yt_last_error) : 'not synced yet'} · synced ${esc(when(S.lastSync))}`;
   return `<div class="card"><h2>Earned</h2><div class="earn">${cells}</div><div class="src">${src}</div>
@@ -487,6 +505,8 @@ function owedHtml() {
   };
   return `<div class="card"><h2>Money owed to you</h2>
     ${rows.length ? `<div class="earn one"><div><div class="lab">Total expected</div><div class="val">${usd(total)}</div></div></div>${rows.map(line).join('')}` : '<div class="empty small">Nothing outstanding.</div>'}
+    ${adsUnpaid().map((r) => `<div class="kv"><span>${r.kind === 'youtube' ? 'YouTube balance' : 'Other AdSense balance'} waiting at AdSense right now<br><span class="small muted">not added to the total: the YouTube lines above estimate this same money</span></span><b>${usd(num(r.amount_usd))}</b></div>`).join('')}
+    ${adsUnpaid().length ? `<div class="src">Balance from AdSense · synced ${esc(when(m.adsense_last_sync))}</div>` : ''}
     <div class="src">Payments marked Pending + YouTube estimates${v2() ? ' · calendar updated ' + esc(when(m.payouts_last_sync)) : ''}</div>
     ${rows.some((r) => r.status === 'no date') ? '<div class="src">To get a calendar reminder, open the payment under Money and add an expected date.</div>' : ''}
   </div>`;
@@ -497,6 +517,7 @@ function homeHtml() {
   return `
   ${overdue.length ? `<div class="alert bad"><span>Overdue: ${esc(overdue.map((r) => r.source + (hasNum(r.amount_usd) ? ' ' + usd(num(r.amount_usd)) : '')).join(', '))}</span></div>` : ''}
   ${late.length ? `<div class="alert"><span>${late.length} deal${late.length === 1 ? ' is' : 's are'} past the due date: ${esc(late.map((d) => d.brand).join(', '))}</span></div>` : ''}
+  ${v4() && !v5() ? `<div class="alert"><span>YouTube money is still an estimate. Real AdSense deposits switch on after the backend update (SETUP.md, Part G).</span></div>` : ''}
   ${!v4() ? `<div class="alert"><span>Your own next steps and due dates switch on after the backend update (SETUP.md, Part F).</span></div>` : ''}
   ${boardHtml()}
   <div class="grid2">${earningsHtml()}${owedHtml()}</div>`;
@@ -709,6 +730,7 @@ function settingsHtml() {
     ${line('Your Sheet', when(S.lastSync), S.err)}
     ${S.outbox.length ? line('Changes waiting to send', String(S.outbox.length)) : ''}
     ${line('YouTube', when(m.yt_last_sync), m.yt_last_error)}
+    ${v5() ? line('AdSense deposits', m.adsense_last_sync ? when(m.adsense_last_sync) : 'not synced yet', m.adsense_last_error) : ''}
     ${v2() ? line('Gmail', when(m.gmail_last_scan), m.gmail_last_error) +
       line('Payout calendar', when(m.payouts_last_sync), m.payouts_last_error) +
       line('Awin', m.awin_last_sync ? when(m.awin_last_sync) : 'keys not added', m.awin_last_error) +
