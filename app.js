@@ -112,6 +112,8 @@ const adsCut = () => {
   return d.toISOString().slice(0, 10);
 };
 const fmtMonth = (day) => new Date(day + 'T00:00:00Z').toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+// A deposit date is a full day, or just a month when AdSense's history gave no day.
+const depDay = (d) => (String(d || '').length === 7 ? fmtMonth(d + '-01') : fmtDay(d));
 const adsUnpaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'unpaid' && num(r.amount_usd) > 0);
 const brandMatch = (a, b) => !!low(a) && !!low(b) && (low(a).startsWith(low(b)) || low(b).startsWith(low(a)));
 
@@ -280,7 +282,7 @@ function totals(p) {
     if (out.deposits.length) out.bySource['AdSense deposits (YouTube)'] = out.yt;
     // AdSense only reports recent deposits. Before the first one it reports, fall back to YouTube's estimate.
     // A deposit pays for the month before it, so the estimate stops at the start of that month.
-    const cut = adsCut();
+    const cut = (S.data.meta || {}).adsense_complete ? '' : adsCut(); // full history loaded: no estimates needed
     let est = 0;
     for (const [d, v] of (S.data.youtube || [])) if (d < cut && inPeriod(d, p)) { est += v; out.ytDays++; }
     if (out.ytDays) { out.bySource['YouTube before ' + fmtMonth(cut) + ' (estimated)'] = est; out.yt += est; out.ytEst = est; }
@@ -470,9 +472,9 @@ function breakdownHtml() {
     </div>
     <h3>Where it came from</h3>${barsHtml(cur.bySource)}
     ${cur.deposits && cur.deposits.length ? `<h3>AdSense deposits</h3>
-      ${cur.deposits.slice().reverse().map((r) => `<div class="kv"><span>${esc(fmtDay(r.date))}</span><b>${usd(num(r.amount_usd))}</b></div>`).join('')}
+      ${cur.deposits.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map((r) => `<div class="kv"><span>${esc(depDay(r.date))}</span><b>${usd(num(r.amount_usd))}</b></div>`).join('')}
       <div class="kv"><span>Total</span><b>${usd(cur.yt - (cur.ytEst || 0))}</b></div>
-      <div class="src">Source: AdSense, exact amounts · synced ${esc(when(m.adsense_last_sync))}</div>` : ''}
+      <div class="src">Source: AdSense, exact amounts · synced ${esc(when(m.adsense_last_sync))}${cur.deposits.some((r) => String(r.date).length === 7) ? ' · where only a month shows, AdSense gave the month but not the day' : ''}</div>` : ''}
     <h3>Who paid</h3>${barsHtml(cur.byBrand)}
     <div class="src">Brands and programs from your logged payments. YouTube is not split by brand.</div>
     <h3>Also received, not counted as earned</h3>
@@ -490,7 +492,7 @@ function earningsHtml() {
   const cells = [['month', monthName()], ['ytd', curYear()], ['all', 'All-time']].map(([p, label]) =>
     `<div><div class="lab">${esc(label)}</div><div class="val">${usd(totals(p).total)}</div></div>`).join('');
   const src = adsPaid().length
-    ? `Payments you logged + AdSense deposits since ${esc(fmtDay(m.adsense_first_date))} (actual) + YouTube estimate before ${esc(fmtMonth(adsCut()))} · synced ${esc(when(S.lastSync))}`
+    ? `Payments you logged + AdSense deposits since ${esc(depDay(m.adsense_first_date))} (actual amounts)${m.adsense_complete ? '' : ' + YouTube estimate before ' + esc(fmtMonth(adsCut()))} · synced ${esc(when(S.lastSync))}`
     : ytOk
     ? `Payments you logged + YouTube estimate through ${esc(fmtDay(m.yt_data_through))} · synced ${esc(when(S.lastSync))}`
     : `Payments you logged only. YouTube ${m.yt_last_error ? 'failed: ' + esc(m.yt_last_error) : 'not synced yet'} · synced ${esc(when(S.lastSync))}`;
@@ -532,6 +534,7 @@ function homeHtml() {
   ${overdue.length ? `<div class="alert bad"><span>Overdue: ${esc(overdue.map((r) => r.source + (hasNum(r.amount_usd) ? ' ' + usd(num(r.amount_usd)) : '')).join(', '))}</span></div>` : ''}
   ${late.length ? `<div class="alert"><span>${late.length} deal${late.length === 1 ? ' is' : 's are'} past the due date: ${esc(late.map((d) => d.brand).join(', '))}</span></div>` : ''}
   ${v4() && !v5() ? `<div class="alert"><span>YouTube money is still an estimate. Real AdSense deposits switch on after the backend update (SETUP.md, Part G).</span></div>` : ''}
+  ${v5() && !(S.data.meta || {}).adsense_complete ? `<div class="alert"><span>YouTube money before Sep 2026 is still an estimate. Your full AdSense history switches on after the backend update (SETUP.md, Part H).</span></div>` : ''}
   ${!v4() ? `<div class="alert"><span>Your own next steps and due dates switch on after the backend update (SETUP.md, Part F).</span></div>` : ''}
   ${boardHtml()}
   <div class="grid2">${earningsHtml()}${owedHtml()}</div>`;
