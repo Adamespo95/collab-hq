@@ -104,6 +104,14 @@ const v3 = () => !!(S.data && S.data.version >= 3);
 const v5 = () => !!(S.data && S.data.version >= 5);
 // Real AdSense payouts (date + exact amount) and the balance AdSense has not paid out yet.
 const adsPaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'paid' && r.date && hasNum(r.amount_usd));
+const adsCut = () => {
+  const first = adsPaid().map((r) => r.date).sort()[0];
+  if (!first) return '';
+  const d = new Date(first.slice(0, 7) + '-01T00:00:00Z');
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 10);
+};
+const fmtMonth = (day) => new Date(day + 'T00:00:00Z').toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
 const adsUnpaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'unpaid' && num(r.amount_usd) > 0);
 const brandMatch = (a, b) => !!low(a) && !!low(b) && (low(a).startsWith(low(b)) || low(b).startsWith(low(a)));
 
@@ -270,6 +278,12 @@ function totals(p) {
     out.deposits = deposits.filter((r) => inPeriod(r.date, p));
     for (const r of out.deposits) out.yt += num(r.amount_usd);
     if (out.deposits.length) out.bySource['AdSense deposits (YouTube)'] = out.yt;
+    // AdSense only reports recent deposits. Before the first one it reports, fall back to YouTube's estimate.
+    // A deposit pays for the month before it, so the estimate stops at the start of that month.
+    const cut = adsCut();
+    let est = 0;
+    for (const [d, v] of (S.data.youtube || [])) if (d < cut && inPeriod(d, p)) { est += v; out.ytDays++; }
+    if (out.ytDays) { out.bySource['YouTube before ' + fmtMonth(cut) + ' (estimated)'] = est; out.yt += est; out.ytEst = est; }
   } else {
     for (const [d, v] of (S.data.youtube || [])) if (inPeriod(d, p)) { out.yt += v; out.ytDays++; }
     if (out.ytDays) out.bySource['YouTube AdSense (estimated)'] = out.yt;
@@ -457,7 +471,7 @@ function breakdownHtml() {
     <h3>Where it came from</h3>${barsHtml(cur.bySource)}
     ${cur.deposits && cur.deposits.length ? `<h3>AdSense deposits</h3>
       ${cur.deposits.slice().reverse().map((r) => `<div class="kv"><span>${esc(fmtDay(r.date))}</span><b>${usd(num(r.amount_usd))}</b></div>`).join('')}
-      <div class="kv"><span>Total</span><b>${usd(cur.yt)}</b></div>
+      <div class="kv"><span>Total</span><b>${usd(cur.yt - (cur.ytEst || 0))}</b></div>
       <div class="src">Source: AdSense, exact amounts · synced ${esc(when(m.adsense_last_sync))}</div>` : ''}
     <h3>Who paid</h3>${barsHtml(cur.byBrand)}
     <div class="src">Brands and programs from your logged payments. YouTube is not split by brand.</div>
@@ -476,7 +490,7 @@ function earningsHtml() {
   const cells = [['month', monthName()], ['ytd', curYear()], ['all', 'All-time']].map(([p, label]) =>
     `<div><div class="lab">${esc(label)}</div><div class="val">${usd(totals(p).total)}</div></div>`).join('');
   const src = adsPaid().length
-    ? `Payments you logged + AdSense deposits since ${esc(fmtDay(m.adsense_first_date))} (actual, not estimates) · synced ${esc(when(S.lastSync))}`
+    ? `Payments you logged + AdSense deposits since ${esc(fmtDay(m.adsense_first_date))} (actual) + YouTube estimate before ${esc(fmtMonth(adsCut()))} · synced ${esc(when(S.lastSync))}`
     : ytOk
     ? `Payments you logged + YouTube estimate through ${esc(fmtDay(m.yt_data_through))} · synced ${esc(when(S.lastSync))}`
     : `Payments you logged only. YouTube ${m.yt_last_error ? 'failed: ' + esc(m.yt_last_error) : 'not synced yet'} · synced ${esc(when(S.lastSync))}`;
