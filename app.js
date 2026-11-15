@@ -19,7 +19,7 @@ const AFF_DEAD = ['declined', 'deleted', 'reversed', 'rejected', 'cancelled', 'c
 const NETWORKS = ['Amazon Associates', 'GoAffPro', 'UpPromote', 'Levanta', 'Awin', 'Impact'];
 const VIEWS = [['home', 'Home'], ['review', 'Review'], ['money', 'Money'], ['more', 'More']];
 const MORE_VIEWS = ['more', 'Contracts'];
-const ALL_TABLES = ['Brands', 'Deals', 'Payments', 'Contracts', 'Sources', 'Payouts', 'Affiliate', 'Queue'];
+const ALL_TABLES = ['Brands', 'Deals', 'Payments', 'Contracts', 'Sources', 'Payouts', 'Affiliate', 'Programs', 'Queue'];
 
 const FORMS = {
   Deals: {
@@ -62,6 +62,17 @@ const FORMS = {
     ],
     defaults: () => ({ date: today(), status: 'Signed' })
   },
+  Programs: {
+    title: 'affiliate program',
+    fields: [
+      ['brand', 'Brand', 'brand'], ['network', 'Network (where you log in)', 'network'],
+      ['code', 'Your discount code', 'text'], ['link', 'Your affiliate link', 'text'],
+      ['rate', 'Commission rate', 'text'], ['status', 'Status', 'select', ['Active', 'Paused', 'Ended']],
+      ['dashboard_url', 'Dashboard web address', 'text'], ['notes', 'Notes', 'area'],
+      ['source', 'Where this info came from', 'text', null, 0, 1]
+    ],
+    defaults: () => ({ status: 'Active', source: 'Added in app' })
+  },
   Affiliate: {
     title: 'affiliate commission',
     fields: [
@@ -78,7 +89,7 @@ const FORMS = {
 const S = {
   cfg: null, data: null, outbox: [], lastSync: null,
   syncing: false, err: null, view: 'home', period: 'month', col: 'in progress', open: false, money: 'Payments',
-  filter: { Deals: 'past', Payments: 'all', Contracts: 'all', Affiliate: 'all', Gear: 'all', review: 'new' }, q: '', csv: null,
+  filter: { Deals: 'past', Payments: 'all', Contracts: 'all', Affiliate: 'all', Programs: 'all', Gear: 'all', review: 'new' }, q: '', csv: null,
   busy: false, bfMsg: ''
 };
 
@@ -103,6 +114,7 @@ const v4 = () => !!(S.data && S.data.version >= 4);
 const v3 = () => !!(S.data && S.data.version >= 3);
 const v5 = () => !!(S.data && S.data.version >= 5);
 const v7 = () => !!(S.data && S.data.version >= 7);
+const v8 = () => !!(S.data && S.data.version >= 8);
 // Real AdSense payouts (date + exact amount) and the balance AdSense has not paid out yet.
 const adsPaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'paid' && r.date && hasNum(r.amount_usd));
 const adsCut = () => {
@@ -310,6 +322,17 @@ function affBucket(r) {
   if (low(r.paid) === 'yes' || s === 'paid') return 'paid';
   if (s === 'approved' || s === 'confirmed' || s === 'locked') return 'approved';
   return 'pending';
+}
+/** What the affiliate log holds for one program (matched by brand name). */
+function programTotals(pg) {
+  const t = { n: 0, pending: 0, approved: 0, paid: 0 };
+  for (const a of T('Affiliate')) {
+    if (!brandMatch(a.program, pg.brand)) continue;
+    const b = affBucket(a);
+    if (b === 'declined') continue;
+    t.n++; t[b] += num(a.commission);
+  }
+  return t;
 }
 function affTotals(p) {
   const by = {};
@@ -573,6 +596,10 @@ function chipsFor(table) {
     const nets = [...new Set(rows.map((r) => r.network || 'Other'))].sort();
     return [['all', 'All', rows.length], ...nets.map((n) => ['net:' + n, n, count((r) => (r.network || 'Other') === n)])];
   }
+  if (table === 'Programs') {
+    const nets = [...new Set(rows.map((r) => r.network || 'Other'))].sort();
+    return [['all', 'All', rows.length], ...nets.map((n) => ['net:' + n, n, count((r) => (r.network || 'Other') === n)])];
+  }
   return [['all', 'All', rows.length], ['linked', 'PDF saved', count((r) => r.drive_url)], ['nopdf', 'No PDF yet', count((r) => !r.drive_url)]];
 }
 function filtered(table) {
@@ -614,6 +641,13 @@ function itemHtml(table, r) {
       <div class="l1"><span class="t">${esc(r.program || r.network)}</span><span class="a">${hasNum(r.commission) ? usd(num(r.commission)) : '<span class="muted">no amount</span>'}</span></div>
       <div class="l2">${esc(fmtDay(r.date))} · ${esc(r.network)}${hasNum(r.sale_amount) ? ' · sale ' + usd(num(r.sale_amount)) : ''} <span class="badge ${stageClass(b)}">${b === 'paid' ? 'paid out' : esc(b)}</span></div></button>`;
   }
+  if (table === 'Programs') {
+    const t = programTotals(r);
+    return `<button class="item" data-act="edit" data-table="Programs" data-id="${esc(r.id)}">
+      <div class="l1"><span class="t">${esc(r.brand)}</span><span class="a small">${r.code ? esc(r.code) : '<span class="muted">no code</span>'}</span></div>
+      <div class="l2">${esc(r.network)}${r.rate ? ' · ' + esc(r.rate) : ''}${low(r.status) !== 'active' && r.status ? ` <span class="badge">${esc(r.status)}</span>` : ''}</div>
+      <div class="l3">${t.n ? `${t.n} sale${t.n === 1 ? '' : 's'} in your log · pending ${usd(t.pending)} · approved ${usd(t.approved)} · paid out ${usd(t.paid)}` : 'No sales in your log'}</div></button>`;
+  }
   return `<button class="item" data-act="edit" data-table="Contracts" data-id="${esc(r.id)}">
     <div class="l1"><span class="t">${esc(r.brand)}</span><span class="a small muted">${esc(r.date)}</span></div>
     <div class="l2">${esc(r.document)} <span class="badge ${r.drive_url ? 'good' : ''}">${r.drive_url ? 'PDF saved' : 'no PDF yet'}</span></div>
@@ -626,17 +660,18 @@ function listHtml(table) {
   return rows.slice(0, cap).map((r) => itemHtml(table, r)).join('') +
     (rows.length > cap ? `<div class="empty small">Showing the newest ${cap} of ${rows.length}. Search or filter to narrow down.</div>` : '');
 }
-const LIST_TITLE = { Deals: 'Past deals', Contracts: 'Contracts', Payments: 'Payments', Affiliate: 'Affiliate sales' };
+const LIST_TITLE = { Deals: 'Past deals', Contracts: 'Contracts', Payments: 'Payments', Affiliate: 'Affiliate sales', Programs: 'Programs' };
 const LIST_SRC = {
   Payments: 'Every payment in your Sheet. Only ones marked Received count as earned.',
   Affiliate: 'What each network reports. Awin and Impact sync daily; the rest come from CSV files and approved emails.',
+  Programs: 'Every affiliate program you are in, with your code and link. Sale totals come from the Affiliate tab.',
   Contracts: 'Drop a PDF in your Contracts folder with the brand in its name and it links itself.',
   Deals: 'Finished, declined and paused deals. Live ones are on Home.'
 };
 function listViewHtml(table) {
   const chips = chipsFor(table);
   const sub = table === 'Contracts' || table === 'Deals';
-  const canAdd = table !== 'Affiliate' || v2();
+  const canAdd = table === 'Programs' ? v8() : table !== 'Affiliate' || v2();
   return `${sub ? `<div class="boardhead"><button class="link" data-act="nav" data-view="${table === 'Deals' ? 'home' : 'more'}">‹ ${table === 'Deals' ? 'Home' : 'More'}</button></div><h1>${LIST_TITLE[table]}</h1>` : ''}
     <div class="toolbar">
       <input type="search" id="q" placeholder="Search" value="${esc(S.q)}">
@@ -665,6 +700,7 @@ function gearInfo(d) {
   const sold = sales.length ? sales.reduce((t, p) => t + num(p.amount_usd), 0) : (logOnly && hasNum(d.resale_value) ? num(d.resale_value) : null);
   return { status, sales, sold, logOnly };
 }
+const brandSite = (name) => ((T('Brands').find((b) => low(b.name) === low(name)) || {}).website || '');
 const looseSales = () => T('Payments').filter((p) => isSale(p) && !p.deal_id && low(p.status) === 'received');
 function gearRowHtml({ d, g }) {
   let line = GEAR_LABEL[g.status] || g.status;
@@ -724,7 +760,16 @@ function openGear(id) {
     <datalist id="wherelist">${SOLD_WHERE.map((w) => `<option value="${w}">`).join('')}</datalist>
     ${d ? '' : `<label>Brand</label><input name="brand" list="brandlist" autocomplete="off">
       <label>Product</label><input name="product">`}
-    <label>What it's worth new ($, retail price)</label><input name="product_value" inputmode="decimal" value="${esc(d ? d.product_value : '')}">
+    <label>What it's worth new ($, retail price)</label><input name="product_value" id="gear-value" inputmode="decimal" value="${esc(d ? d.product_value : '')}">
+    <input type="hidden" name="value_source" value="">
+    <div class="small muted" id="gear-src" style="margin-top:5px">${d && d.value_source ? 'Source: ' + esc(d.value_source) : d && hasNum(d.product_value) ? 'Source: your deal log' : ''}</div>
+    <p class="small" style="margin:8px 0 0"><a href="#" data-act="pricetoggle">Find the price online</a></p>
+    <div id="pf" hidden>
+      <label>Store website</label><input name="pf_site" placeholder="kingbullbike.com" autocapitalize="off" value="${esc(d ? brandSite(d.brand) : '')}">
+      <label>Search the store for</label><input name="pf_q" value="${esc(d ? String(d.product).replace(/\(.*?\)/g, '').split('+')[0].trim() : '')}">
+      <div style="margin-top:10px"><button type="button" class="btn" data-act="pricefind">Search</button></div>
+      <div id="pf-out" class="small" style="margin-top:10px"></div>
+    </div>
     <label>What happened to it</label><select name="item_status" id="gear-status">${opt(GEAR_STATUS, g.status)}</select>
     <div id="gear-sold" ${g.status === 'sold' ? '' : 'hidden'}>
       <label>Sold for ($)</label><input name="sold" inputmode="decimal" value="${g.sold === null ? '' : esc(String(g.sold))}">
@@ -756,7 +801,12 @@ function saveGear(form) {
     if (!T('Brands').some((b) => low(b.name) === low(d.brand))) batch.push(['Brands', uid(), { name: d.brand, contact_name: '', contact_email: '', notes: '', deleted: '' }]);
     batch.push(['Deals', id, { brand: d.brand, product: d.product, stage: 'done', deal_type: 'Product only', date: today().slice(0, 7), source: 'Added in app (Gear)', deleted: '' }]);
   }
-  batch.push(['Deals', id, { product_value: value, item_status: status, resale_value: status === 'sold' ? sold : '' }]);
+  const gearFields = { product_value: value, item_status: status, resale_value: status === 'sold' ? sold : '' };
+  if (v8() && value !== String(d.product_value ?? '')) gearFields.value_source = value === '' ? '' : (val('value_source') || 'Typed in by you on ' + today());
+  batch.push(['Deals', id, gearFields]);
+  const site = val('pf_site').toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  const br = T('Brands').find((b) => low(b.name) === low(d.brand));
+  if (v8() && site && br && site !== br.website && val('value_source')) batch.push(['Brands', br.id, { website: site }]);
   const saleId = form.dataset.sale;
   if (status === 'sold' && sold !== '' && date) {
     // A dated sale is a payment row linked to this item, so it shows up in the right month.
@@ -799,7 +849,7 @@ function saveGearMatch(form) {
 
 function moneyHtml() {
   return `<div class="seg wide">
-      ${[['Payments', 'Payments'], ['Affiliate', 'Affiliate sales'], ['Gear', 'Gear']].map(([k, l]) => `<button data-act="money" data-m="${k}" class="${S.money === k ? 'on' : ''}">${l}</button>`).join('')}
+      ${[['Payments', 'Payments'], ['Affiliate', 'Sales'], ['Programs', 'Programs'], ['Gear', 'Gear']].map(([k, l]) => `<button data-act="money" data-m="${k}" class="${S.money === k ? 'on' : ''}">${l}</button>`).join('')}
     </div>${S.money === 'Gear' ? gearHtml() : listViewHtml(S.money)}`;
 }
 
@@ -964,6 +1014,12 @@ function openForm(table, id, preset, queueId) {
       extra = `<label>Contracts on file for ${esc(row.brand)}</label>` + cons.map((c) => `<div class="kv small"><span>${esc(c.document)} <span class="muted">· ${esc(c.date)}</span></span>${c.drive_url ? `<a href="${esc(c.drive_url)}" target="_blank" rel="noopener">Open PDF</a>` : `<span class="muted">no PDF yet</span>`}</div>`).join('');
     }
   }
+  if (table === 'Programs' && id) {
+    top = `<div class="rowbtns" style="margin-bottom:6px">
+      ${row.code ? `<button type="button" class="btn sm" data-act="copy" data-text="${esc(row.code)}">Copy code</button>` : ''}
+      ${row.link ? `<button type="button" class="btn sm" data-act="copy" data-text="${esc(row.link)}">Copy link</button>` : ''}
+      ${/^https:\/\//.test(row.dashboard_url || '') ? `<a class="btn sm" href="${esc(row.dashboard_url)}" target="_blank" rel="noopener">Open dashboard</a>` : ''}</div>`;
+  }
   if (table === 'Contracts' && id && row.drive_url) extra = `<p class="small"><a href="${esc(row.drive_url)}" target="_blank" rel="noopener">Open PDF in Drive</a></p>`;
   const fields = formFields(table);
   const main = fields.filter((f) => !f[5]);
@@ -1000,6 +1056,7 @@ function saveForm(form) {
   }
   if ((table === 'Deals' || table === 'Contracts') && !fields.brand) { toast('Brand is required'); return; }
   if (table === 'Affiliate' && !fields.network) { toast('Network is required'); return; }
+  if (table === 'Programs' && !fields.brand) { toast('Brand is required'); return; }
   if (table === 'Deals' && fields.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(fields.due_date)) { toast('Due date must look like 2026-11-30'); return; }
   if (table === 'Payments' && fields.expected_date && !/^\d{4}-\d{2}-\d{2}$/.test(fields.expected_date)) { toast('Expected date must look like 2026-12-21'); return; }
   const isNew = !form.dataset.id;
@@ -1159,6 +1216,43 @@ const ACT = {
   },
   add(el) { openForm(el.dataset.table, null); },
   gear(el) { openGear(el.dataset.id); },
+  async copy(el) {
+    try { await navigator.clipboard.writeText(el.dataset.text); toast('Copied'); } catch (e) { toast('Could not copy. Select the text in the form instead.'); }
+  },
+  pricetoggle() {
+    if (!v8()) return toast('Switches on after the backend update (SETUP.md, Part J).');
+    const b = $('#pf'); if (!b) return;
+    b.hidden = !b.hidden;
+    const f = $('#gearform');
+    if (!b.hidden && f.elements.brand && !f.elements.pf_site.value) f.elements.pf_site.value = brandSite(f.elements.brand.value);
+    if (!b.hidden && f.elements.product && !f.elements.pf_q.value) f.elements.pf_q.value = f.elements.product.value;
+  },
+  async pricefind(el) {
+    const f = $('#gearform'), out = $('#pf-out');
+    if (!navigator.onLine) { out.textContent = 'You are offline. Price lookup needs the internet.'; return; }
+    el.disabled = true; out.textContent = 'Asking the store…';
+    try {
+      const res = await api({ action: 'price', website: f.elements.pf_site.value, query: f.elements.pf_q.value, changes: [] });
+      if (!res.ok) throw new Error(res.error || 'Lookup failed');
+      const pr = res.price || {};
+      if (!document.body.contains(out)) return;
+      if (pr.error) out.textContent = pr.error;
+      else if (!pr.results.length) out.textContent = 'The store found nothing for that. Try fewer words.';
+      else {
+        out.innerHTML = '<div class="muted" style="margin-bottom:6px">From ' + esc(pr.host) + ' right now. Tap the price to use:</div>' + pr.results.map((r) => {
+          const use = (amount, kind) => `<button type="button" class="btn sm" data-act="priceuse" data-v="${esc(amount)}" data-src="${esc(pr.host + ', ' + kind + ' price of “' + r.title + '”, checked ' + today() + ' · ' + r.url)}">${kind === 'list' ? 'List ' : 'Now '}${usd(num(amount))}</button>`;
+          return `<div class="kv"><span>${esc(r.title)}</span><span style="white-space:nowrap">${r.list_price ? use(r.list_price, 'list') + ' ' : ''}${use(r.price, 'current')}</span></div>`;
+        }).join('');
+      }
+    } catch (e) { if (document.body.contains(out)) out.textContent = 'Could not look it up: ' + e.message; }
+    el.disabled = false;
+  },
+  priceuse(el) {
+    const f = $('#gearform'); if (!f) return;
+    f.elements.product_value.value = el.dataset.v;
+    f.elements.value_source.value = el.dataset.src;
+    $('#gear-src').textContent = 'Source: ' + el.dataset.src;
+  },
   gearadd() { openGear(null); },
   gearmatch(el) { if (!v7()) return toast('Switches on after the backend update (SETUP.md, Part I).'); openGearMatch(el.dataset.id); },
   edit(el) { openForm(el.dataset.table, el.dataset.id); },
@@ -1189,8 +1283,8 @@ const ACT = {
   qaff(el) {
     const q = queueRow(el.dataset.id); if (!q) return;
     mutateMany([
-      ['Affiliate', 'goaffpro:' + (q.order_ref || q.id), {
-        network: 'GoAffPro', program: q.brand_guess, date: q.received, order_ref: q.order_ref, sale_amount: q.sale_amount,
+      ['Affiliate', (/bixgrow/i.test(q.from) ? 'bixgrow:' : 'goaffpro:') + (q.order_ref || q.id), {
+        network: /bixgrow/i.test(q.from) ? 'BixGrow' : 'GoAffPro', program: q.brand_guess, date: q.received, order_ref: q.order_ref, sale_amount: q.sale_amount,
         commission: q.amount_usd, currency: 'USD', status: 'pending', paid: 'no', source: 'Gmail: ' + q.subject,
         synced_at: new Date().toISOString(), deleted: ''
       }],
@@ -1314,6 +1408,7 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('input', (e) => {
   if (e.target.id === 'q') { S.q = e.target.value; const l = $('#list'); if (l) l.innerHTML = listHtml(listTable()); }
   if (e.target.id === 'csv-net') csvSummary();
+  if (e.target.id === 'gear-value') { const f = $('#gearform'); f.elements.value_source.value = ''; $('#gear-src').textContent = ''; }
 });
 document.addEventListener('change', (e) => {
   if (e.target.id === 'csvfile' && e.target.files[0]) {
