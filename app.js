@@ -18,7 +18,7 @@ const AFF_STATUS = ['pending', 'approved', 'paid', 'declined'];
 const AFF_DEAD = ['declined', 'deleted', 'reversed', 'rejected', 'cancelled', 'canceled'];
 const NETWORKS = ['Amazon Associates', 'GoAffPro', 'UpPromote', 'Levanta', 'Awin', 'Impact'];
 const VIEWS = [['home', 'Home'], ['review', 'Review'], ['money', 'Money'], ['more', 'More']];
-const MORE_VIEWS = ['more', 'Contracts'];
+const MORE_VIEWS = ['more', 'Contracts', 'Brands', 'brand', 'Dates'];
 const ALL_TABLES = ['Brands', 'Deals', 'Payments', 'Contracts', 'Sources', 'Payouts', 'Affiliate', 'Programs', 'Queue'];
 
 const FORMS = {
@@ -35,7 +35,11 @@ const FORMS = {
       ['cash_received', 'Cash received so far ($)', 'money', null, 0, 1], ['affiliate', 'Affiliate terms', 'text', null, 0, 1],
       ['contract', 'Contract', 'text', null, 0, 1], ['status_note', 'Status note', 'text', null, 0, 1],
       ['notes', 'Notes', 'area', null, 0, 1], ['source', 'Where this info came from', 'text', null, 0, 1],
-      ['needs_review', 'Flag (why this needs a second look; clear it when sorted)', 'text', null, 0, 1]
+      ['needs_review', 'Flag (why this needs a second look; clear it when sorted)', 'text', null, 0, 1],
+      ['deliver_by', 'Content due', 'date', null, 9, 2],
+      ['excl_until', 'Exclusivity ends (you can\'t promote competitors until then)', 'date', null, 9, 2],
+      ['excl_what', 'What the exclusivity covers (for example: other e-bike brands)', 'text', null, 9, 2],
+      ['usage_until', 'Brand may use your content until', 'date', null, 9, 2]
     ],
     defaults: () => ({ stage: 'talking', date: today(), source: 'Added in app' })
   },
@@ -90,7 +94,7 @@ const S = {
   cfg: null, data: null, outbox: [], lastSync: null,
   syncing: false, err: null, view: 'home', period: 'month', col: 'in progress', open: false, money: 'Payments',
   filter: { Deals: 'past', Payments: 'all', Contracts: 'all', Affiliate: 'all', Programs: 'all', Gear: 'all', review: 'new' }, q: '', csv: null,
-  busy: false, bfMsg: ''
+  busy: false, bfMsg: '', brand: ''
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -115,6 +119,10 @@ const v3 = () => !!(S.data && S.data.version >= 3);
 const v5 = () => !!(S.data && S.data.version >= 5);
 const v7 = () => !!(S.data && S.data.version >= 7);
 const v8 = () => !!(S.data && S.data.version >= 8);
+const v9 = () => !!(S.data && S.data.version >= 9);
+const isoDay = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '').trim()) ? String(v).trim() : '');
+const dayDiff = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000);
+const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
 // Real AdSense payouts (date + exact amount) and the balance AdSense has not paid out yet.
 const adsPaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'paid' && r.date && hasNum(r.amount_usd));
 const adsCut = () => {
@@ -217,7 +225,7 @@ async function api(body, cfg = S.cfg) {
 }
 function takeSnapshot(res) {
   S.data = {
-    version: res.version || 1, tables: res.tables, youtube: res.youtube || [], adsense: res.adsense || [], meta: res.meta || {},
+    version: res.version || 1, tables: res.tables, youtube: res.youtube || [], adsense: res.adsense || [], videos: res.videos || [], meta: res.meta || {},
     sheet_url: res.sheet_url, folder_url: res.folder_url
   };
   for (const name of ALL_TABLES) if (!S.data.tables[name]) S.data.tables[name] = [];
@@ -381,6 +389,9 @@ function render() {
   else if (S.view === 'review') v.innerHTML = reviewHtml();
   else if (S.view === 'money') v.innerHTML = moneyHtml();
   else if (S.view === 'more') v.innerHTML = settingsHtml();
+  else if (S.view === 'Brands') v.innerHTML = brandsHtml();
+  else if (S.view === 'brand') v.innerHTML = brandHtml(S.brand);
+  else if (S.view === 'Dates') v.innerHTML = datesHtml();
   else v.innerHTML = listViewHtml(S.view);
 }
 
@@ -423,7 +434,7 @@ function stageOf(d) {
 /** What to do next on a deal: your own note if you wrote one, otherwise a plain line from its stage. */
 function nextStep(d) {
   const st = stageOf(d);
-  const due = /^\d{4}-\d{2}-\d{2}$/.test(d.due_date || '') ? d.due_date : '';
+  const due = isoDay(d.due_date) || (['talking', 'in progress'].includes(st) ? isoDay(d.deliver_by) : '');
   let text = String(d.next_step || '').trim();
   if (!text) {
     if (st === 'talking') text = 'Waiting on the brand';
@@ -454,6 +465,7 @@ function dealCardHtml(d) {
     <div class="dc1"><span class="t">${esc(d.brand)}</span><span class="a">${cash}</span></div>
     <div class="dc2">${esc(d.product)}</div>
     <div class="dc3${n.late ? ' late' : ''}">${esc(n.text)}${n.due ? ` · ${n.late ? 'was due' : 'due'} ${esc(fmtDay(n.due))}` : ''}</div>
+    ${stageOf(d) === 'talking' && clashes(d).length ? `<div class="dc4">Check exclusivity: ${esc(clashes(d).map(exclLine).join('; '))}</div>` : ''}
   </button>`;
 }
 function boardHtml() {
@@ -465,7 +477,8 @@ function boardHtml() {
       <div class="colhead">${label} <span>${list.length}</span></div>
       ${list.length ? list.map(dealCardHtml).join('') : `<div class="empty small">${EMPTY_COL[k]}</div>`}
     </section>`).join('')}</div>
-  <button class="link" data-act="past">Past deals (${past}) ›</button>`;
+  <div class="linkrow"><button class="link" data-act="past">Past deals (${past}) ›</button>
+    <button class="link" data-act="nav" data-view="Brands">Brands (${brandNames().length}) ›</button></div>`;
 }
 /** On a phone the board shows one column at a time: keep the swipe position and the stage tabs in step. */
 let colLock = 0;
@@ -565,6 +578,8 @@ function homeHtml() {
   ${late.length ? `<div class="alert"><span>${late.length} deal${late.length === 1 ? ' is' : 's are'} past the due date: ${esc(late.map((d) => d.brand).join(', '))}</span></div>` : ''}
   ${v4() && !v5() ? `<div class="alert"><span>YouTube money is still an estimate. Real AdSense deposits switch on after the backend update (SETUP.md, Part G).</span></div>` : ''}
   ${v5() && !(S.data.meta || {}).adsense_complete ? `<div class="alert"><span>YouTube money before Sep 2026 is still an estimate. Your full AdSense history switches on after the backend update (SETUP.md, Part H).</span></div>` : ''}
+  ${v8() && !v9() ? `<div class="alert"><span>Video earnings and contract dates switch on after the backend update (SETUP.md, Part K).</span></div>` : ''}
+  ${soonDates().map((x) => `<div class="alert"><span>${esc(x.label)} ${esc(x.d.brand)}: ${esc(fmtDay(x.date))} (${x.days === 0 ? 'today' : 'in ' + plural(x.days, 'day')})</span></div>`).join('')}
   ${!v4() ? `<div class="alert"><span>Your own next steps and due dates switch on after the backend update (SETUP.md, Part F).</span></div>` : ''}
   ${boardHtml()}
   <div class="grid2">${earningsHtml()}${owedHtml()}</div>`;
@@ -854,6 +869,242 @@ function moneyHtml() {
 }
 
 
+/* ------------------------------------------------- videos and what they earned */
+/** Your videos as YouTube lists them: { id, title, published, views, rev }. views/rev are null when YouTube gave no figure. */
+function videos() {
+  return ((S.data && S.data.videos) || []).map(([id, title, published, views, rev]) => ({
+    id, title, published, views: hasNum(views) ? num(views) : null, rev: hasNum(rev) ? num(rev) : null
+  }));
+}
+const videoIds = (d) => String(d.video_ids || '').split(',').map((x) => x.trim()).filter(Boolean);
+function dealVideos(d) {
+  const all = videos();
+  return videoIds(d).map((id) => all.find((v) => v.id === id) || { id, title: 'Video no longer on your channel', published: '', views: null, rev: null });
+}
+function videoSum(list) {
+  const known = list.filter((v) => v.rev !== null);
+  return { n: list.length, known: known.length, rev: known.reduce((t, v) => t + v.rev, 0), views: list.reduce((t, v) => t + (v.views || 0), 0) };
+}
+const videoSrc = () => {
+  const m = (S.data && S.data.meta) || {};
+  return `YouTube's own estimate for each video since it was published${m.videos_data_through ? ', through ' + esc(fmtDay(m.videos_data_through)) : ''} · synced ${esc(when(m.videos_last_sync))}`;
+};
+function videoRowHtml(v) {
+  return `<div class="kv"><span>${v.published ? `<a href="https://www.youtube.com/watch?v=${esc(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a>` : esc(v.title)}
+    <br><span class="small muted">${v.published ? esc(fmtDay(v.published)) : ''}${v.views !== null ? ' · ' + v.views.toLocaleString('en-US') + ' views' : ''}</span></span>
+    <b>${v.rev !== null ? usd(v.rev) : '<span class="muted">no figure yet</span>'}</b></div>`;
+}
+/** Shown at the top of a deal: everything this deal brought in, each line from its own source. */
+function dealEarnHtml(d) {
+  if (['talking', 'declined'].includes(stageOf(d))) return '';
+  const vs = dealVideos(d);
+  const sum = videoSum(vs);
+  const got = hasNum(d.cash_received) ? num(d.cash_received) : null;
+  const agreed = hasNum(d.cash_agreed) ? num(d.cash_agreed) : 0;
+  const aff = brandAff(brandKey(d.brand));
+  const g = isGear(d) ? gearInfo(d) : null;
+  const lines = [];
+  if (got !== null || agreed > 0) lines.push(['Cash from the brand' + (got === null ? ' <span class="small muted">(agreed ' + usd(agreed) + ', nothing marked received on this deal)</span>' : ''), got === null ? '<span class="muted">$0.00</span>' : usd(got)]);
+  if (vs.length) lines.push([`YouTube ad money on ${vs.length === 1 ? 'its video' : 'its ' + vs.length + ' videos'} <span class="small muted">(estimate${sum.views ? ', ' + sum.views.toLocaleString('en-US') + ' views' : ''})</span>`, sum.known ? usd(sum.rev) : '<span class="muted">no figure yet</span>']);
+  if (!lines.length && !aff.n && !(g && hasNum(d.product_value))) return v9() ? '<div class="src" style="margin:10px 0 0">Link this deal\'s video below to see what it earned on YouTube.</div>' : '';
+  const total = (got || 0) + sum.rev;
+  return `<div class="earnbox">
+    <div class="lab">What this deal earned</div><div class="val">${usd(total)}</div>
+    ${lines.map(([l, a]) => `<div class="kv"><span>${l}</span><b>${a}</b></div>`).join('')}
+    ${g && hasNum(d.product_value) ? `<div class="kv"><span>Product they sent <span class="small muted">(not counted above)</span></span><b>${usd(num(d.product_value))}</b></div>` : ''}
+    ${g && g.sold ? `<div class="kv"><span>You sold it for <span class="small muted">(not counted above)</span></span><b>${usd(g.sold)}</b></div>` : ''}
+    ${aff.n ? `<div class="kv"><span>All ${esc(brandKey(d.brand))} affiliate sales <span class="small muted">(${plural(aff.n, 'sale')}, whole brand: networks don't say which video)</span></span><b>${usd(aff.paid + aff.approved + aff.pending)}</b></div>` : ''}
+    <div class="src">${vs.length ? videoSrc() + '. ' : v9() ? 'No video linked yet: pick it below. ' : ''}Cash is this deal's "Cash received so far".</div></div>`;
+}
+function videoPickHtml(row) {
+  return `<label>Video for this deal</label>
+    <input type="hidden" name="video_ids" value="${esc(videoIds(row).join(','))}">
+    <div id="vpicked"></div>
+    ${videos().length ? `<input type="search" id="vq" placeholder="Search your ${videos().length} videos by title" autocomplete="off">` : `<div class="small muted">${esc((S.data.meta || {}).videos_last_error || 'Your video list has not synced yet. More > Fetch everything from Google.')}</div>`}
+    <div id="vres"></div>`;
+}
+function renderVideoPick() {
+  const f = $('#form'); if (!f || !f.elements.video_ids) return;
+  const picked = f.elements.video_ids.value.split(',').filter(Boolean);
+  const all = videos();
+  $('#vpicked').innerHTML = picked.map((id) => {
+    const v = all.find((x) => x.id === id);
+    return `<div class="kv small"><span>${esc(v ? v.title : 'Video no longer on your channel')}</span><button type="button" class="btn sm" data-act="vdel" data-id="${esc(id)}">Remove</button></div>`;
+  }).join('');
+  const qEl = $('#vq'); if (!qEl) return;
+  const q = low(qEl.value);
+  // Nothing typed: suggest videos with the brand's name in the title.
+  const brand = low(f.elements.brand.value).split(/\s+/)[0];
+  const words = q ? q.split(/\s+/) : (brand.length >= 3 ? [brand] : null);
+  const hits = !words ? [] : all.filter((v) => !picked.includes(v.id) && words.every((w) => low(v.title).includes(w)))
+    .sort((a, b) => String(b.published).localeCompare(String(a.published))).slice(0, 6);
+  $('#vres').innerHTML = hits.map((v) => `<button type="button" class="vhit" data-act="vadd" data-id="${esc(v.id)}"><span>${esc(v.title)}</span><span class="small muted">${esc(fmtDay(v.published))}</span></button>`).join('') ||
+    (q ? '<div class="small muted" style="margin-top:6px">No video title matches that.</div>' : '');
+}
+/** Remembers the day a deal became Owed and the day it became Done, so pay speed can be measured. */
+function stageStamp(old, to) {
+  const from = old ? stageOf(old) : '';
+  const out = {};
+  if (to === from) return out;
+  if (to === 'owed' && !(old && old.owed_on)) out.owed_on = today();
+  if (to === 'done' && !(old && old.done_on)) out.done_on = today();
+  return out;
+}
+
+/* ---------------------------------------------------------- contract dates */
+const DATE_LABEL = { deliver_by: 'Content due for', excl_until: 'Exclusivity ends with', usage_until: 'Usage rights end for' };
+/** Every contract date typed into a deal, soonest first. */
+function allDates() {
+  const out = [];
+  for (const d of T('Deals')) {
+    const st = stageOf(d);
+    if (st === 'declined') continue;
+    for (const kind of Object.keys(DATE_LABEL)) {
+      const date = isoDay(d[kind]);
+      if (!date || (kind === 'deliver_by' && !['talking', 'in progress'].includes(st))) continue;
+      out.push({ d, kind, date, label: DATE_LABEL[kind], days: dayDiff(today(), date) });
+    }
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+/** Exclusivity and usage-rights dates in the next two weeks (content due dates already show on the deal card). */
+const soonDates = () => allDates().filter((x) => x.kind !== 'deliver_by' && x.days >= 0 && x.days <= 14);
+const exclActive = () => T('Deals').filter((d) => stageOf(d) !== 'declined' && isoDay(d.excl_until) >= today() && isoDay(d.excl_until));
+/** Other brands' exclusivity that is still running while this deal is open. */
+function clashes(d) {
+  return exclActive().filter((x) => x.id !== d.id && d.brand && low(brandKey(x.brand)) !== low(brandKey(d.brand)));
+}
+const exclLine = (x) => `${x.brand} until ${fmtDay(x.excl_until)}${x.excl_what ? ' (' + x.excl_what + ')' : ''}`;
+function datesHtml() {
+  const all = allDates();
+  const row = (x) => `<button class="item" data-act="edit" data-table="Deals" data-id="${esc(x.d.id)}">
+    <div class="l1"><span class="t">${esc(x.label)} ${esc(x.d.brand)}</span><span class="a small ${x.days < 0 && x.kind === 'deliver_by' ? 'late' : ''}">${esc(fmtDay(x.date))}</span></div>
+    <div class="l2">${esc(x.d.product)}${x.kind === 'excl_until' && x.d.excl_what ? ' · ' + esc(x.d.excl_what) : ''} · ${x.days === 0 ? 'today' : x.days > 0 ? 'in ' + plural(x.days, 'day') : plural(-x.days, 'day') + ' ago'}</div></button>`;
+  const up = all.filter((x) => x.days >= 0), past = all.filter((x) => x.days < 0).reverse();
+  return `<div class="boardhead"><button class="link" data-act="nav" data-view="more">‹ More</button></div><h1>Contract dates</h1>
+    ${!v9() ? '<div class="alert"><span>Contract dates switch on after the backend update (SETUP.md, Part K).</span></div>' : ''}
+    <div class="list">${up.map(row).join('') || '<div class="empty">No upcoming dates. Open a deal and fill in "Contract dates".</div>'}</div>
+    ${past.length ? `<h3>Already passed</h3><div class="list">${past.slice(0, 50).map(row).join('')}</div>` : ''}
+    <div class="src">From the "Contract dates" section of each deal. You type them in from the contract; the app does not read them out of PDFs. Each one is also on your "Collab HQ Payouts" calendar.</div>`;
+}
+
+/* ------------------------------------------------------------ scorecards */
+const sameBrand = (raw, name) => low(brandKey(raw)) === low(name);
+function brandNames() {
+  const seen = new Map();
+  for (const n of T('Brands').map((b) => b.name).concat(T('Deals').map((d) => brandKey(d.brand)))) {
+    if (n && n !== 'No brand' && !seen.has(low(n))) seen.set(low(n), n);
+  }
+  return [...seen.values()];
+}
+function brandAff(name) {
+  const t = { n: 0, pending: 0, approved: 0, paid: 0 };
+  for (const a of T('Affiliate')) {
+    if (!brandMatch(a.program, name) || !hasNum(a.commission)) continue;
+    const b = affBucket(a);
+    if (b === 'declined') continue;
+    t.n++; t[b] += num(a.commission);
+  }
+  return t;
+}
+/** Everything the Sheet holds about one brand. Every figure is a sum of rows; nothing is estimated here. */
+function brandStats(name) {
+  const deals = T('Deals').filter((d) => sameBrand(d.brand, name));
+  const pays = T('Payments').filter((p) => sameBrand(p.brand_or_program, name) && !isSale(p) && low(p.income_type) !== 'youtube adsense');
+  const got = pays.filter((p) => low(p.status) === 'received' && hasNum(p.amount_usd));
+  const s = { name, deals, got, cash: got.reduce((t, p) => t + num(p.amount_usd), 0) };
+  s.lastPaid = got.map((p) => String(p.date)).sort().pop() || '';
+  s.pending = pays.filter((p) => low(p.status) === 'pending');
+  s.overdue = s.pending.filter((p) => isoDay(p.expected_date) && p.expected_date < today());
+  s.disputed = pays.filter((p) => low(p.status) === 'disputed');
+  // On time or late can only be judged where a payment has both the date it was expected and the date it arrived.
+  s.timed = got.filter((p) => isoDay(p.expected_date) && isoDay(p.date));
+  s.lateN = s.timed.filter((p) => p.date > p.expected_date).length;
+  s.speed = deals.filter((d) => isoDay(d.owed_on) && isoDay(d.done_on)).map((d) => dayDiff(d.owed_on, d.done_on));
+  const gear = deals.filter((d) => isGear(d) && gearInfo(d).status !== 'not received');
+  s.gearN = gear.filter((d) => hasNum(d.product_value)).length;
+  s.gear = gear.reduce((t, d) => t + num(d.product_value), 0);
+  s.sold = gear.reduce((t, d) => t + (gearInfo(d).sold || 0), 0);
+  s.aff = brandAff(name);
+  const fees = deals.filter((d) => num(d.cash_agreed) > 0 && !['talking', 'declined'].includes(stageOf(d))).map((d) => num(d.cash_agreed));
+  s.fees = fees;
+  const seen = new Set();
+  s.videos = deals.flatMap(dealVideos).filter((v) => !seen.has(v.id) && seen.add(v.id));
+  s.vsum = videoSum(s.videos);
+  s.excl = deals.filter((d) => isoDay(d.excl_until) >= today() && isoDay(d.excl_until));
+  s.usage = deals.filter((d) => isoDay(d.usage_until) >= today() && isoDay(d.usage_until));
+  return s;
+}
+function brandListHtml() {
+  const q = low(S.q);
+  const rows = brandNames().filter((n) => !q || low(n).includes(q)).map(brandStats)
+    .sort((a, b) => b.cash - a.cash || b.gear - a.gear || a.name.localeCompare(b.name));
+  if (!rows.length) return '<div class="empty">Nothing here.</div>';
+  return rows.map((s) => {
+    const bits = [plural(s.deals.length, 'deal')];
+    if (s.gear) bits.push(usd(s.gear) + ' in products');
+    if (s.aff.n) bits.push(usd(s.aff.paid + s.aff.approved + s.aff.pending) + ' affiliate');
+    const flag = s.disputed.length ? '<span class="badge bad">In dispute</span>' : s.overdue.length ? '<span class="badge bad">Paying late</span>' : s.pending.length ? '<span class="badge warn">Owes you</span>' : '';
+    return `<button class="item" data-act="brand" data-name="${esc(s.name)}">
+      <div class="l1"><span class="t">${esc(s.name)}</span><span class="a">${s.cash ? usd(s.cash) : '<span class="muted">no cash</span>'}</span></div>
+      <div class="l2">${esc(bits.join(' · '))} ${flag}</div></button>`;
+  }).join('');
+}
+function brandsHtml() {
+  return `<div class="boardhead"><button class="link" data-act="nav" data-view="home">‹ Home</button></div><h1>Brands</h1>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search" value="${esc(S.q)}"></div>
+    <div class="list" id="list">${brandListHtml()}</div>
+    <div class="src">Sorted by cash paid to you. The amount on the right is cash payments marked Received. Synced ${esc(when(S.lastSync))}.</div>`;
+}
+function brandHtml(name) {
+  const s = brandStats(name);
+  const b = T('Brands').find((x) => low(x.name) === low(name)) || {};
+  const m = S.data.meta || {};
+  const sumOf = (list) => list.reduce((t, p) => t + num(p.amount_usd), 0);
+  const affAll = s.aff.paid + s.aff.approved + s.aff.pending;
+  const kv = (l, r) => `<div class="kv"><span>${l}</span><b>${r}</b></div>`;
+  const pay = [];
+  if (s.got.length) pay.push(kv(plural(s.got.length, 'cash payment') + ' received', 'last ' + esc(fmtDay(s.lastPaid))));
+  if (s.pending.length) pay.push(kv('Owes you now' + (s.overdue.length ? ` <span class="small late">(${usd(sumOf(s.overdue))} past its expected date)</span>` : ''), usd(sumOf(s.pending))));
+  if (s.disputed.length) pay.push(kv('<span class="late">In dispute</span>', usd(sumOf(s.disputed))));
+  pay.push(s.timed.length
+    ? kv('Paid late', `${s.lateN} of ${s.timed.length}`) + `<div class="src">Counted over the ${plural(s.timed.length, 'payment')} that had an expected date.</div>`
+    : '<div class="src">On time or late: not known yet. No payment from this brand has both an expected date and a received date. Add an expected date to a pending payment and it is tracked from then on.</div>');
+  pay.push(s.speed.length
+    ? kv('Average wait from Owed to Done', plural(Math.round(s.speed.reduce((t, n) => t + n, 0) / s.speed.length), 'day')) + `<div class="src">Over ${plural(s.speed.length, 'deal')} moved through Owed in the app.</div>`
+    : `<div class="src">Days to pay: measured from now on, each time a deal moves to Owed and then to Done${v9() ? '' : ' (after the backend update, SETUP.md Part K)'}.</div>`);
+  const fee = s.fees.length ? kv('Average agreed fee', usd(s.fees.reduce((t, n) => t + n, 0) / s.fees.length)) + kv('Highest agreed fee', usd(Math.max(...s.fees))) +
+    `<div class="src">Over ${plural(s.fees.length, 'deal')} with a cash fee.</div>` : '<div class="src">No deal with this brand has had a cash fee.</div>';
+  const pg = T('Programs').filter((p) => brandMatch(p.brand, name));
+  const dealRow = (d) => {
+    const vs = videoSum(dealVideos(d));
+    return itemHtml('Deals', d).replace('</button>', `${vs.n ? `<div class="l3">${plural(vs.n, 'video')} · ${vs.views.toLocaleString('en-US')} views · ${vs.known ? usd(vs.rev) + ' YouTube ad money (est.)' : 'no figure yet'}</div>` : ''}</button>`);
+  };
+  return `<div class="boardhead"><button class="link" data-act="nav" data-view="Brands">‹ Brands</button></div><h1>${esc(name)}</h1>
+    ${s.excl.map((d) => `<div class="alert"><span>Exclusive with ${esc(name)} until ${esc(fmtDay(d.excl_until))}${d.excl_what ? ': ' + esc(d.excl_what) : ''}</span></div>`).join('')}
+    <div class="card"><h2>What they've been worth</h2>
+      <div class="earn"><div><div class="lab">Cash paid</div><div class="val">${usd(s.cash)}</div></div>
+        <div><div class="lab">Products sent</div><div class="val">${usd(s.gear)}</div></div>
+        <div><div class="lab">Affiliate</div><div class="val">${usd(affAll)}</div></div></div>
+      ${s.aff.n ? `<div class="src">Affiliate: ${usd(s.aff.paid)} paid out, ${usd(s.aff.approved)} approved, ${usd(s.aff.pending)} pending, from ${plural(s.aff.n, 'sale')} in your log.</div>` : ''}
+      ${s.vsum.n ? kv(`YouTube ad money on ${plural(s.vsum.n, 'linked video')} <span class="small muted">(estimate, ${s.vsum.views.toLocaleString('en-US')} views)</span>`, s.vsum.known ? usd(s.vsum.rev) : '<span class="muted">no figure yet</span>') : ''}
+      ${s.sold ? kv('You sold their products for <span class="small muted">(buyers paid this, not the brand)</span>', usd(s.sold)) : ''}
+      <div class="src">Cash = payments marked Received for this brand. Products = retail value on ${plural(s.gearN, 'deal')}. Synced ${esc(when(S.lastSync))}.</div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h2>How they pay</h2>${pay.join('')}</div>
+      <div class="card"><h2>What to quote</h2>${fee}
+        ${s.usage.map((d) => kv(`May use your content until <span class="small muted">(${esc(d.product)})</span>`, esc(fmtDay(d.usage_until)))).join('')}</div>
+    </div>
+    <h3>Deals</h3><div class="list">${s.deals.slice().sort((a, c) => String(c.date ?? '').localeCompare(String(a.date ?? ''))).map(dealRow).join('') || '<div class="empty">No deals logged.</div>'}</div>
+    ${s.videos.length ? `<div class="card" style="margin-top:14px"><h2>Videos</h2>${s.videos.map(videoRowHtml).join('')}<div class="src">${videoSrc()}</div></div>` : ''}
+    ${pg.length ? `<div class="card" style="margin-top:14px"><h2>Affiliate program</h2>${pg.map((p) => kv(`${esc(p.network)}${p.rate ? ' · ' + esc(p.rate) : ''}`, p.code ? esc(p.code) : '<span class="muted">no code</span>')).join('')}</div>` : ''}
+    ${b.contact_name || b.contact_email || b.website ? `<div class="card" style="margin-top:14px"><h2>Contact</h2>
+      ${b.contact_name || b.contact_email ? kv(esc(b.contact_name || 'Contact'), b.contact_email ? `<a href="mailto:${esc(b.contact_email)}">${esc(b.contact_email)}</a>` : '') : ''}
+      ${b.website ? kv('Website', esc(b.website)) : ''}</div>` : ''}
+    ${m.videos_last_error && s.videos.length ? `<div class="src late">${esc(m.videos_last_error)}</div>` : ''}`;
+}
+
 /* ----------------------------------------------------------------- review */
 const KIND_LABEL = { deal: 'Labeled "Collab"', payment: 'Money received', affiliate: 'Referral sale', contract: 'Contract PDF', contact: 'Brand contact', label: 'Unknown payer' };
 function reviewHtml() {
@@ -947,6 +1198,8 @@ function settingsHtml() {
   <div class="card"><div class="rowbtns">
       <button class="btn" data-act="nav" data-view="Contracts">Contracts (${T('Contracts').length})</button>
       <button class="btn" data-act="past">Past deals</button>
+      <button class="btn" data-act="nav" data-view="Brands">Brands (${brandNames().length})</button>
+      <button class="btn" data-act="nav" data-view="Dates">Contract dates (${allDates().length})</button>
       ${S.data.sheet_url ? `<a class="btn" href="${esc(S.data.sheet_url)}" target="_blank" rel="noopener">Open Google Sheet</a>` : ''}
       ${S.data.folder_url ? `<a class="btn" href="${esc(S.data.folder_url)}" target="_blank" rel="noopener">Contracts folder</a>` : ''}
   </div></div>
@@ -954,6 +1207,8 @@ function settingsHtml() {
     ${line('Your Sheet', when(S.lastSync), S.err)}
     ${S.outbox.length ? line('Changes waiting to send', String(S.outbox.length)) : ''}
     ${line('YouTube', when(m.yt_last_sync), m.yt_last_error)}
+    ${v9() ? line('Per-video revenue', m.videos_last_sync ? when(m.videos_last_sync) : 'not synced yet', m.videos_last_error) +
+      line('Contract dates on calendar', m.dates_last_sync ? when(m.dates_last_sync) : 'none yet', m.dates_last_error) : ''}
     ${v5() ? line('AdSense deposits', m.adsense_last_sync ? when(m.adsense_last_sync) : 'not synced yet', m.adsense_last_error) : ''}
     ${v2() ? line('Gmail', when(m.gmail_last_scan), m.gmail_last_error) +
       line('Payout calendar', when(m.payouts_last_sync), m.payouts_last_error) +
@@ -992,6 +1247,7 @@ function fieldHtml([name, label, type, opts], val) {
   }
   if (type === 'area') return `<label>${label}</label><textarea name="${name}">${v}</textarea>`;
   if (type === 'money') return `<label>${label}</label><input name="${name}" inputmode="decimal" value="${v}">`;
+  if (type === 'date') return `<label>${label}</label><input type="date" name="${name}" value="${esc(isoDay(val))}">`;
   if (type === 'brand') return `<label>${label}</label><input name="${name}" list="brandlist" value="${v}" autocomplete="off">`;
   if (type === 'network') return `<label>${label}</label><input name="${name}" list="netlist" value="${v}" autocomplete="off">`;
   return `<label>${label}</label><input name="${name}" value="${v}">`;
@@ -1009,10 +1265,16 @@ function openForm(table, id, preset, queueId) {
     const to = nextStage(existing);
     top = `<div class="movebar"><span>Stage: <b>${esc(STAGE_LABEL[stageOf(existing)])}</b></span>
       ${to ? `<button type="button" class="btn primary sm" data-act="move" data-to="${to}">Move to ${esc(STAGE_LABEL[to])}</button>` : ''}</div>`;
+    top += dealEarnHtml(existing);
     const cons = T('Contracts').filter((c) => brandMatch(c.brand, row.brand));
     if (cons.length) {
       extra = `<label>Contracts on file for ${esc(row.brand)}</label>` + cons.map((c) => `<div class="kv small"><span>${esc(c.document)} <span class="muted">· ${esc(c.date)}</span></span>${c.drive_url ? `<a href="${esc(c.drive_url)}" target="_blank" rel="noopener">Open PDF</a>` : `<span class="muted">no PDF yet</span>`}</div>`).join('');
     }
+  }
+  if (table === 'Deals') {
+    const ex = clashes(row);
+    if (ex.length && ['talking', 'in progress'].includes(row.stage)) top += `<div class="alert" style="margin-top:10px"><span>Check before you agree. Active exclusivity: ${esc(ex.map(exclLine).join('; '))}</span></div>`;
+    if (id) extra += `<p class="small"><a href="#" data-act="brand" data-name="${esc(brandKey(row.brand))}">Open the ${esc(brandKey(row.brand))} scorecard</a></p>`;
   }
   if (table === 'Programs' && id) {
     top = `<div class="rowbtns" style="margin-bottom:6px">
@@ -1023,7 +1285,9 @@ function openForm(table, id, preset, queueId) {
   if (table === 'Contracts' && id && row.drive_url) extra = `<p class="small"><a href="${esc(row.drive_url)}" target="_blank" rel="noopener">Open PDF in Drive</a></p>`;
   const fields = formFields(table);
   const main = fields.filter((f) => !f[5]);
-  const more = fields.filter((f) => f[5]);
+  const more = fields.filter((f) => f[5] === 1);
+  const dates = fields.filter((f) => f[5] === 2);
+  const datesSet = dates.some((f) => row[f[0]]);
   const m = $('#modal');
   m.innerHTML = `<form class="sheet" id="form" data-table="${table}" data-id="${esc(id || '')}" data-queue="${esc(queueId || '')}">
     <h3>${id ? 'Edit' : 'New'} ${def.title}</h3>
@@ -1032,6 +1296,9 @@ function openForm(table, id, preset, queueId) {
     <datalist id="brandlist">${T('Brands').map((b) => `<option value="${esc(b.name)}">`).join('')}</datalist>
     <datalist id="netlist">${[...new Set(NETWORKS.concat(T('Affiliate').map((a) => a.network).filter(Boolean)))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
     ${main.map((f) => fieldHtml(f, row[f[0]])).join('')}
+    ${table === 'Deals' && v9() ? videoPickHtml(row) : ''}
+    ${dates.length ? `<details class="morefields" ${datesSet ? 'open' : ''}><summary>Contract dates</summary>${dates.map((f) => fieldHtml(f, row[f[0]])).join('')}
+      <div class="src">Each date you fill in goes on your "Collab HQ Payouts" calendar.</div></details>` : ''}
     ${more.length ? `<details class="morefields"><summary>More details</summary>${more.map((f) => fieldHtml(f, row[f[0]])).join('')}</details>` : ''}
     ${extra}
     <div class="actions">
@@ -1041,6 +1308,7 @@ function openForm(table, id, preset, queueId) {
       <button type="submit" class="btn primary">Save</button>
     </div></form>`;
   m.hidden = false;
+  if (table === 'Deals' && v9()) renderVideoPick();
 }
 function closeForm() { const m = $('#modal'); m.hidden = true; m.innerHTML = ''; S.csv = null; }
 function saveForm(form) {
@@ -1061,6 +1329,10 @@ function saveForm(form) {
   if (table === 'Payments' && fields.expected_date && !/^\d{4}-\d{2}-\d{2}$/.test(fields.expected_date)) { toast('Expected date must look like 2026-12-21'); return; }
   const isNew = !form.dataset.id;
   if (isNew) fields.deleted = '';
+  if (table === 'Deals' && v9()) {
+    if (form.elements.video_ids) fields.video_ids = form.elements.video_ids.value;
+    Object.assign(fields, stageStamp(isNew ? null : T('Deals').find((r) => r.id === id), fields.stage));
+  }
   const batch = [];
   if (table === 'Deals' && !T('Brands').some((b) => low(b.name) === low(fields.brand))) {
     batch.push(['Brands', uid(), { name: fields.brand, contact_name: '', contact_email: '', notes: '', deleted: '' }]);
@@ -1206,10 +1478,21 @@ const ACT = {
     const wasOwed = stageOf(d) === 'owed';
     closeForm();
     if (LIVE.includes(to)) S.col = to;
-    mutate('Deals', d.id, v4() ? { stage: to, next_step: '', due_date: '' } : { stage: to });
+    mutate('Deals', d.id, v4() ? { stage: to, next_step: '', due_date: '', ...(v9() ? stageStamp(d, to) : {}) } : { stage: to });
     toast(to === 'done' && wasOwed ? 'Moved to Done. Log the payment under Money so it counts as earned.' : 'Moved to ' + STAGE_LABEL[to]);
   },
   rfilter(el) { S.filter.review = el.dataset.f; render(); },
+  brand(el) { closeForm(); S.brand = el.dataset.name; S.view = 'brand'; S.q = ''; render(); window.scrollTo(0, 0); },
+  vadd(el) {
+    const h = $('#form').elements.video_ids;
+    h.value = h.value.split(',').filter(Boolean).concat(el.dataset.id).join(',');
+    $('#vq').value = ''; renderVideoPick();
+  },
+  vdel(el) {
+    const h = $('#form').elements.video_ids;
+    h.value = h.value.split(',').filter((x) => x && x !== el.dataset.id).join(',');
+    renderVideoPick();
+  },
   review() {
     const dealsFirst = !T('Payments').some((r) => r.needs_review);
     S.view = dealsFirst ? 'Deals' : 'Payments'; S.filter[S.view] = 'review'; S.q = ''; render();
@@ -1406,7 +1689,8 @@ document.addEventListener('submit', (e) => {
   if (e.target.id === 'matchform') saveGearMatch(e.target);
 });
 document.addEventListener('input', (e) => {
-  if (e.target.id === 'q') { S.q = e.target.value; const l = $('#list'); if (l) l.innerHTML = listHtml(listTable()); }
+  if (e.target.id === 'q') { S.q = e.target.value; const l = $('#list'); if (l) l.innerHTML = S.view === 'Brands' ? brandListHtml() : listHtml(listTable()); }
+  if (e.target.id === 'vq') renderVideoPick();
   if (e.target.id === 'csv-net') csvSummary();
   if (e.target.id === 'gear-value') { const f = $('#gearform'); f.elements.value_source.value = ''; $('#gear-src').textContent = ''; }
 });
