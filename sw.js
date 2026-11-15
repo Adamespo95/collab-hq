@@ -1,6 +1,6 @@
 // Collab HQ service worker: keeps the app itself available offline.
 // Your data is cached separately by app.js in IndexedDB.
-const CACHE = 'collab-hq-v8';
+const CACHE = 'collab-hq-v9';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'

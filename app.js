@@ -31,7 +31,7 @@ const FORMS = {
       ['cash_agreed', 'Cash they pay you ($). Leave empty for product only.', 'money'],
       ['deliverables', 'What you deliver', 'area'], ['contact', 'Contact (name / email)', 'text'],
       ['date', 'Deal date (YYYY-MM-DD or YYYY-MM)', 'text', null, 0, 1], ['deal_type', 'Deal type', 'text', null, 0, 1],
-      ['product_value', 'Product value ($)', 'money', null, 0, 1], ['resale_value', 'Resale value ($)', 'money', null, 0, 1],
+      ['product_value', 'Product value ($)', 'money', null, 0, 1], ['resale_value', 'Sold for ($) (set it under Money > Gear)', 'money', null, 0, 1],
       ['cash_received', 'Cash received so far ($)', 'money', null, 0, 1], ['affiliate', 'Affiliate terms', 'text', null, 0, 1],
       ['contract', 'Contract', 'text', null, 0, 1], ['status_note', 'Status note', 'text', null, 0, 1],
       ['notes', 'Notes', 'area', null, 0, 1], ['source', 'Where this info came from', 'text', null, 0, 1],
@@ -78,7 +78,7 @@ const FORMS = {
 const S = {
   cfg: null, data: null, outbox: [], lastSync: null,
   syncing: false, err: null, view: 'home', period: 'month', col: 'in progress', open: false, money: 'Payments',
-  filter: { Deals: 'past', Payments: 'all', Contracts: 'all', Affiliate: 'all', review: 'new' }, q: '', csv: null,
+  filter: { Deals: 'past', Payments: 'all', Contracts: 'all', Affiliate: 'all', Gear: 'all', review: 'new' }, q: '', csv: null,
   busy: false, bfMsg: ''
 };
 
@@ -102,6 +102,7 @@ const v2 = () => !!(S.data && S.data.version >= 2);
 const v4 = () => !!(S.data && S.data.version >= 4);
 const v3 = () => !!(S.data && S.data.version >= 3);
 const v5 = () => !!(S.data && S.data.version >= 5);
+const v7 = () => !!(S.data && S.data.version >= 7);
 // Real AdSense payouts (date + exact amount) and the balance AdSense has not paid out yet.
 const adsPaid = () => ((S.data && S.data.adsense) || []).filter((r) => r.status === 'paid' && r.date && hasNum(r.amount_usd));
 const adsCut = () => {
@@ -261,7 +262,7 @@ function brandKey(raw) {
   return hit || k;
 }
 function totals(p) {
-  const out = { cash: 0, resale: 0, yt: 0, ytDays: 0, bySource: {}, byBrand: {}, product: 0, productDeals: 0 };
+  const out = { cash: 0, resale: 0, resaleLog: 0, yt: 0, ytDays: 0, bySource: {}, byBrand: {}, product: 0, productDeals: 0 };
   for (const r of T('Payments')) {
     if (low(r.status) !== 'received' || !hasNum(r.amount_usd) || !inPeriod(r.date, p)) continue;
     const type = low(r.income_type);
@@ -293,6 +294,12 @@ function totals(p) {
   for (const d of T('Deals')) {
     if (!hasNum(d.product_value) || ['talking', 'declined'].includes(stageOf(d)) || !inPeriod(d.date, p)) continue;
     out.product += num(d.product_value); out.productDeals++;
+  }
+  // Sale prices that only exist in the deal log have no date, so they can only be counted under All-time.
+  if (p === 'all') for (const d of T('Deals')) {
+    if (!isGear(d)) continue;
+    const g = gearInfo(d);
+    if (g.logOnly && g.sold) { out.resale += g.sold; out.resaleLog += g.sold; }
   }
   out.total = out.cash + out.yt;
   return out;
@@ -480,7 +487,7 @@ function breakdownHtml() {
     <h3>Also received, not counted as earned</h3>
     <div class="kv"><span>Bikes and gear you sold</span><b>${usd(cur.resale)}</b></div>
     <div class="kv"><span>Value of products brands sent you <span class="muted small">(${cur.productDeals} deals)</span></span><b>${usd(cur.product)}</b></div>
-    <div class="src">From your Payments and Deals tabs.</div>
+    <div class="src">${cur.resaleLog ? usd(cur.resaleLog) + ' of the sold figure comes from your deal log with no sale date, so it only shows under All-time. ' : ''}Details under Money > Gear.</div>
     ${nets.length ? `<h3>Affiliate sales the networks report</h3>
       <div class="tbl"><div class="tr th"><span>Network</span><span>Pending</span><span>Approved</span><span>Paid out</span></div>
       ${nets.map((n) => `<div class="tr"><span>${esc(n)}</span><span>${usd(by[n].pending)}</span><span>${usd(by[n].approved)}</span><span>${usd(by[n].paid)}</span></div>`).join('')}</div>
@@ -640,10 +647,160 @@ function listViewHtml(table) {
     <div class="list" id="list">${listHtml(table)}</div>
     <div class="src">${LIST_SRC[table]} Synced ${esc(when(S.lastSync))}.</div>`;
 }
+/* ------------------------------------------------------------------- gear */
+const GEAR_STATUS = [['', 'Not set yet'], ['have', 'Still have it'], ['sold', 'Sold it'], ['gave away', 'Gave it away'],
+  ['returned', 'Sent it back'], ['not received', 'Never received it']];
+const GEAR_LABEL = Object.fromEntries(GEAR_STATUS);
+const SOLD_WHERE = ['Facebook Marketplace', 'Craigslist', 'OfferUp', 'eBay', 'Friend or family', 'Local buyer'];
+/** A deal counts as gear when a brand sent (or is sending) you something physical. */
+function isGear(d) {
+  return !['talking', 'declined'].includes(stageOf(d)) && !/^(affiliate|revenue share)$/i.test(String(d.deal_type || '').trim());
+}
+const isSale = (p) => RESALE_TYPES.includes(low(p.income_type));
+function gearInfo(d) {
+  const sales = T('Payments').filter((p) => p.deal_id === d.id && isSale(p));
+  let status = low(d.item_status);
+  if (!status && (sales.length || hasNum(d.resale_value))) status = 'sold';
+  const logOnly = status === 'sold' && !sales.length;
+  const sold = sales.length ? sales.reduce((t, p) => t + num(p.amount_usd), 0) : (logOnly && hasNum(d.resale_value) ? num(d.resale_value) : null);
+  return { status, sales, sold, logOnly };
+}
+const looseSales = () => T('Payments').filter((p) => isSale(p) && !p.deal_id && low(p.status) === 'received');
+function gearRowHtml({ d, g }) {
+  let line = GEAR_LABEL[g.status] || g.status;
+  if (g.status === 'sold') {
+    const s = g.sales[0];
+    line = g.sold === null ? 'Sold · price not entered'
+      : 'Sold for ' + usd(g.sold) + (s ? ' · ' + fmtDay(s.date) + (s.payer ? ' · ' + s.payer : '') : ' · from your deal log, no date');
+  }
+  const cls = !g.status ? 'warn' : g.status === 'sold' ? 'good' : '';
+  return `<button class="item" data-act="gear" data-id="${esc(d.id)}">
+    <div class="l1"><span class="t">${esc(d.brand)} ${esc(d.product)}</span><span class="a">${hasNum(d.product_value) ? usd(num(d.product_value)) : '<span class="muted">no value</span>'}</span></div>
+    <div class="l2"><span class="badge ${cls}">${esc(line)}</span></div></button>`;
+}
+function gearHtml() {
+  const items = T('Deals').filter(isGear).map((d) => ({ d, g: gearInfo(d) }))
+    .sort((a, b) => String(b.d.date ?? '').localeCompare(String(a.d.date ?? '')));
+  const got = items.filter((x) => x.g.status !== 'not received');
+  const groups = {
+    all: ['All', items], unset: ['Not set yet', items.filter((x) => !x.g.status)],
+    novalue: ['No value yet', got.filter((x) => !hasNum(x.d.product_value))],
+    have: ['Still have', items.filter((x) => x.g.status === 'have')], sold: ['Sold', items.filter((x) => x.g.status === 'sold')]
+  };
+  const f = groups[S.filter.Gear] ? S.filter.Gear : 'all';
+  const value = got.reduce((t, x) => t + num(x.d.product_value), 0);
+  const sold = items.reduce((t, x) => t + (x.g.sold || 0), 0);
+  const dated = items.reduce((t, x) => t + (x.g.sales.length ? x.g.sold : 0), 0);
+  const loose = looseSales();
+  const looseSum = loose.reduce((t, p) => t + num(p.amount_usd), 0);
+  return `<div class="card"><h2>Gear brands sent you</h2>
+      <div class="earn"><div><div class="lab">Worth (retail)</div><div class="val">${usd(value)}</div></div>
+        <div><div class="lab">Sold for</div><div class="val">${usd(sold + looseSum)}</div></div>
+        <div><div class="lab">Still have</div><div class="val">${groups.have[1].length}</div></div></div>
+      <div class="src">${got.length} items. ${groups.novalue[1].length} have no value yet and ${groups.unset[1].length} aren't marked as kept or sold, so these totals are incomplete until you fill them in.</div>
+      <div class="src">Sold for = ${usd(dated)} in sales with a date + ${usd(sold - dated)} from your deal log (no date)${loose.length ? ' + ' + usd(looseSum) + ' not matched to an item' : ''}. Not counted as earned.</div>
+    </div>
+    ${!v7() ? '<div class="alert"><span>Marking gear as sold switches on after the backend update (SETUP.md, Part I).</span></div>' : ''}
+    ${loose.map((p) => `<button class="item" data-act="gearmatch" data-id="${esc(p.id)}">
+      <div class="l1"><span class="t">Sale not matched to an item</span><span class="a">${usd(num(p.amount_usd))}</span></div>
+      <div class="l2">${esc(fmtDay(p.date))} · ${esc(p.payer)} <span class="badge warn">Tap to say what you sold</span></div>
+      <div class="l3">If it is one of the items below that already shows a sale price, it is counted twice until you match it.</div></button>`).join('')}
+    <div class="toolbar"><span class="sp" style="flex:1"></span><button class="btn primary" data-act="gearadd" ${v7() ? '' : 'disabled'}>+ Add gear</button></div>
+    <div class="chips">${Object.entries(groups).map(([k, [l, list]]) => `<button data-act="filter" data-f="${k}" class="${f === k ? 'on' : ''}">${l} ${list.length}</button>`).join('')}</div>
+    <div class="list">${groups[f][1].map(gearRowHtml).join('') || '<div class="empty">Nothing here.</div>'}</div>
+    <div class="src">Every deal where a brand sent you a product. Tap one to set its value and what happened to it. Synced ${esc(when(S.lastSync))}.</div>`;
+}
+/** id = an existing deal's gear. No id = gear that is not in the app yet. */
+function openGear(id) {
+  const d = id ? T('Deals').find((r) => r.id === id) : null;
+  if (id && !d) return;
+  const g = d ? gearInfo(d) : { status: 'have', sales: [], sold: null };
+  const s = g.sales[0];
+  const opt = (list, cur) => list.map(([k, l]) => `<option value="${esc(k)}" ${k === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+  const m = $('#modal');
+  m.innerHTML = `<form class="sheet" id="gearform" data-id="${esc(id || '')}" data-sale="${esc(s ? s.id : '')}">
+    <h3>${d ? esc(d.brand + ' ' + d.product) : 'Add gear'}</h3>
+    <datalist id="brandlist">${T('Brands').map((b) => `<option value="${esc(b.name)}">`).join('')}</datalist>
+    <datalist id="wherelist">${SOLD_WHERE.map((w) => `<option value="${w}">`).join('')}</datalist>
+    ${d ? '' : `<label>Brand</label><input name="brand" list="brandlist" autocomplete="off">
+      <label>Product</label><input name="product">`}
+    <label>What it's worth new ($, retail price)</label><input name="product_value" inputmode="decimal" value="${esc(d ? d.product_value : '')}">
+    <label>What happened to it</label><select name="item_status" id="gear-status">${opt(GEAR_STATUS, g.status)}</select>
+    <div id="gear-sold" ${g.status === 'sold' ? '' : 'hidden'}>
+      <label>Sold for ($)</label><input name="sold" inputmode="decimal" value="${g.sold === null ? '' : esc(String(g.sold))}">
+      <label>Date sold (YYYY-MM-DD). Leave empty if you don't know.</label><input name="sold_date" value="${esc(s ? s.date : (g.status === 'sold' ? '' : today()))}">
+      <label>Where or who bought it</label><input name="sold_where" list="wherelist" autocomplete="off" value="${esc(s ? s.payer : '')}">
+    </div>
+    ${d ? `<p class="small"><a href="#" data-act="edit" data-table="Deals" data-id="${esc(d.id)}">Open the full deal</a></p>` : ''}
+    <div class="actions"><span class="sp"></span>
+      <button type="button" class="btn" data-act="close">Cancel</button>
+      <button type="submit" class="btn primary">Save</button></div></form>`;
+  m.hidden = false;
+}
+function saveGear(form) {
+  const el = form.elements;
+  const val = (n) => (el[n] ? el[n].value.trim() : '');
+  const money = (n) => { const v = val(n); if (v !== '' && !hasNum(v)) { toast('"' + v + '" is not a number'); el[n].focus(); return null; } return v === '' ? '' : String(num(v)); };
+  const value = money('product_value'); if (value === null) return;
+  const status = val('item_status');
+  const sold = status === 'sold' ? money('sold') : ''; if (sold === null) return;
+  const date = status === 'sold' ? val('sold_date') : '';
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('Date sold must look like 2026-11-15'); return; }
+  let id = form.dataset.id;
+  const batch = [];
+  let d = id ? T('Deals').find((r) => r.id === id) : null;
+  if (!d) {
+    if (!val('brand') || !val('product')) { toast('Brand and product are required'); return; }
+    id = uid();
+    d = { brand: val('brand'), product: val('product') };
+    if (!T('Brands').some((b) => low(b.name) === low(d.brand))) batch.push(['Brands', uid(), { name: d.brand, contact_name: '', contact_email: '', notes: '', deleted: '' }]);
+    batch.push(['Deals', id, { brand: d.brand, product: d.product, stage: 'done', deal_type: 'Product only', date: today().slice(0, 7), source: 'Added in app (Gear)', deleted: '' }]);
+  }
+  batch.push(['Deals', id, { product_value: value, item_status: status, resale_value: status === 'sold' ? sold : '' }]);
+  const saleId = form.dataset.sale;
+  if (status === 'sold' && sold !== '' && date) {
+    // A dated sale is a payment row linked to this item, so it shows up in the right month.
+    batch.push(['Payments', saleId || uid(), {
+      date, payer: val('sold_where'), income_type: 'Review-unit resale', brand_or_program: d.brand + ' ' + d.product,
+      amount_usd: sold, status: 'Received', deal_id: id, ...(saleId ? {} : { note: 'Sold: ' + d.brand + ' ' + d.product, evidence: 'Added in app (Gear)', deleted: '' })
+    }]);
+  } else if (saleId) {
+    batch.push(['Payments', saleId, { deleted: '1' }]); // no longer a dated sale
+  }
+  closeForm();
+  mutateMany(batch);
+  toast(navigator.onLine ? 'Saved' : 'Saved on this device. Will sync when you are back online.');
+}
+function openGearMatch(payId) {
+  const p = T('Payments').find((r) => r.id === payId);
+  if (!p) return;
+  const items = T('Deals').filter(isGear).filter((d) => !gearInfo(d).sales.length)
+    .sort((a, b) => (a.brand + a.product).localeCompare(b.brand + b.product));
+  const m = $('#modal');
+  m.innerHTML = `<form class="sheet" id="matchform" data-id="${esc(p.id)}">
+    <h3>What did you sell for ${usd(num(p.amount_usd))}?</h3>
+    <p class="small muted" style="margin-top:-6px">${esc(fmtDay(p.date))} · ${esc(p.payer)}${p.note ? ' · ' + esc(p.note) : ''}</p>
+    <label>Item</label><select name="deal">${items.map((d) => `<option value="${esc(d.id)}">${esc(d.brand + ' ' + d.product)}${hasNum(d.resale_value) ? ' (log says sold for ' + usd(num(d.resale_value)) + ')' : ''}</option>`).join('')}</select>
+    <p class="small muted">Not in the list? Cancel, tap + Add gear, then come back.</p>
+    <div class="actions"><span class="sp"></span>
+      <button type="button" class="btn" data-act="close">Cancel</button>
+      <button type="submit" class="btn primary">Match</button></div></form>`;
+  m.hidden = false;
+}
+function saveGearMatch(form) {
+  const p = T('Payments').find((r) => r.id === form.dataset.id);
+  const d = T('Deals').find((r) => r.id === form.elements.deal.value);
+  if (!p || !d) return;
+  closeForm();
+  mutateMany([['Payments', p.id, { deal_id: d.id, brand_or_program: d.brand + ' ' + d.product, needs_review: '' }],
+    ['Deals', d.id, { item_status: 'sold', resale_value: String(num(p.amount_usd)) }]]);
+  toast('Matched');
+}
+
 function moneyHtml() {
   return `<div class="seg wide">
-      ${[['Payments', 'Payments'], ['Affiliate', 'Affiliate sales']].map(([k, l]) => `<button data-act="money" data-m="${k}" class="${S.money === k ? 'on' : ''}">${l}</button>`).join('')}
-    </div>${listViewHtml(S.money)}`;
+      ${[['Payments', 'Payments'], ['Affiliate', 'Affiliate sales'], ['Gear', 'Gear']].map(([k, l]) => `<button data-act="money" data-m="${k}" class="${S.money === k ? 'on' : ''}">${l}</button>`).join('')}
+    </div>${S.money === 'Gear' ? gearHtml() : listViewHtml(S.money)}`;
 }
 
 
@@ -1001,6 +1158,9 @@ const ACT = {
     S.view = dealsFirst ? 'Deals' : 'Payments'; S.filter[S.view] = 'review'; S.q = ''; render();
   },
   add(el) { openForm(el.dataset.table, null); },
+  gear(el) { openGear(el.dataset.id); },
+  gearadd() { openGear(null); },
+  gearmatch(el) { if (!v7()) return toast('Switches on after the backend update (SETUP.md, Part I).'); openGearMatch(el.dataset.id); },
   edit(el) { openForm(el.dataset.table, el.dataset.id); },
   close() { closeForm(); },
   del() {
@@ -1145,7 +1305,12 @@ document.addEventListener('click', (e) => {
   if (el && ACT[el.dataset.act]) { e.preventDefault(); ACT[el.dataset.act](el); return; }
   if (e.target.id === 'modal') closeForm();
 });
-document.addEventListener('submit', (e) => { e.preventDefault(); if (e.target.id === 'form') saveForm(e.target); });
+document.addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (e.target.id === 'form') saveForm(e.target);
+  if (e.target.id === 'gearform') { if (!v7()) return toast('Switches on after the backend update (SETUP.md, Part I).'); saveGear(e.target); }
+  if (e.target.id === 'matchform') saveGearMatch(e.target);
+});
 document.addEventListener('input', (e) => {
   if (e.target.id === 'q') { S.q = e.target.value; const l = $('#list'); if (l) l.innerHTML = listHtml(listTable()); }
   if (e.target.id === 'csv-net') csvSummary();
@@ -1160,6 +1325,7 @@ document.addEventListener('change', (e) => {
     e.target.value = '';
   }
   if (e.target.dataset && (e.target.dataset.csv || e.target.id === 'csv-status')) csvSummary();
+  if (e.target.id === 'gear-status') { const b = $('#gear-sold'); if (b) b.hidden = e.target.value !== 'sold'; }
 });
 window.addEventListener('resize', () => { if (S.view === 'home' && S.data) restoreBoard(); });
 window.addEventListener('online', () => { renderStatus(); sync(); });
