@@ -1034,13 +1034,24 @@ const ACT = {
     if (reset && !confirm('Scan everything again? Items you already approved or dismissed stay as they are.')) return;
     S.busy = true; S.bfMsg = 'Starting…'; render();
     try {
-      for (let i = 0; i < 40; i++) {
+      let waits = 0;
+      for (let i = 0; i < 60; i++) {
         const sent = S.outbox.slice();
         const res = await api({ action: 'backfill', reset: reset && i === 0, changes: sent });
         absorb(res, sent);
         S.bfMsg = (res.backfill && res.backfill.message) || '';
         await persist(); render();
-        if (!res.backfill || res.backfill.done || res.backfill.failed) break;
+        if (!res.backfill || res.backfill.done) break;
+        if (res.backfill.failed) {
+          // Gmail's per-minute speed limit: wait it out and carry on, instead of asking for another tap.
+          if (!/quota|rate limit|too many/i.test(S.bfMsg) || waits >= 8) break;
+          waits++;
+          for (let s = 90; s > 0; s -= 5) {
+            S.bfMsg = 'Gmail asked the scan to slow down. Continuing by itself in ' + s + ' seconds. Keep this screen open.';
+            render();
+            await new Promise((r) => setTimeout(r, 5000));
+          }
+        }
       }
     } catch (e) {
       S.bfMsg = 'Stopped: ' + e.message + '. Tap the button again to pick up where it left off.';
